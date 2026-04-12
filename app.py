@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-49-caption-font-jp-glyph-check"
+PORTAL_BUILD = "20260413-51-msc-pick-newest-image"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -507,13 +507,12 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     """
     MSC「ひまわり画像（日本域）」一覧 list_jpn.html から JPG を選ぶ。
 
-    - 候補は **UTC の分が 00 または 30** のスロットのみ（30 分境界）。
-    - ファイル名は ``jpn_*_HHMM.jpg`` のみで日付が無いため、各 HHMM について
-      **前日・当日**の暦日を付けた UTC 時刻のうち ref_utc に最も近い解釈を採用し、
-      **時刻差の絶対値が最小**のものを優先（同差は **より新しい** 暦時刻）。
-    - 未来に寄りすぎないよう、ref より **30 分以上先**の半時は候補から除外。
-    - 得られた HHMM を **URL 実在（HEAD / 先頭バイト）**で上から順に検証し、
-      最初に成功したものを採用（未発表枠をスキップ）。
+    - 一覧に出る ``jpn_*_HHMM.jpg`` の時刻（10 分刻み等）をそのまま候補にする。
+    - ファイル名に日付が無いため、各 HHMM について **前日・当日・翌日**の暦日を付けた
+      UTC のうち **ref 以前で最も新しい**解釈を 1 つに決める（常に可能な限り新しい観測枠）。
+    - **ref より未来の観測枠は採用しない**（時計ずれ用に約 90 秒だけ許容）。
+    - 各 HHMM について決めた観測時刻の **新しい順**に URL を試し、最初に応答したものを採用
+      （「参照に近い順」だと未配信枠の次に前日の同 HHMM が先に通り、1 日前の画像になり得る）。
 
     戻り値: (url, hhmm, slot_utc_iso, slot_utc) — slot_utc は上記で選んだ観測時刻（UTC）。
     band 例: tre（真彩色）, b13（赤外 TBB）
@@ -534,67 +533,47 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     if not times:
         raise ValueError(f"MSC 一覧に jpn_{b}_HHMM.jpg が見つかりません")
 
-    half_times = [t for t in times if int(t[2:4]) in (0, 30)]
-    if not half_times:
-        half_times = times
+    # 一覧は 10 分刻み等。:00/:30 のみに絞ると「最新」が候補から落ちるため一覧をそのまま使う。
+    slot_times = sorted(times)
 
-    # HHMM ごとに「ref に最も近い暦日付け」を 1 つに決める（URL は HHMM のみのため重複）
-    best_for_hhmm: dict[str, tuple[float, datetime]] = {}
-    for hhmm in half_times:
+    # HHMM ごとに「ref 以前で最も新しい」暦日付けを 1 つに決める（URL は HHMM のみのため）
+    future_cut_sec = 90.0
+    per_hhmm: dict[str, datetime] = {}
+    for hhmm in slot_times:
         hm = datetime.strptime(hhmm, "%H%M").time()
+        best_slot: datetime | None = None
         for day in (
             ref.date() - timedelta(days=1),
             ref.date(),
             ref.date() + timedelta(days=1),
         ):
             slot = datetime.combine(day, hm, tzinfo=UTC)
-            delta = (slot - ref).total_seconds()
-            if delta > 30 * 60:
+            if (slot - ref).total_seconds() > future_cut_sec:
                 continue
-            if delta < -40 * 3600:
+            if (slot - ref).total_seconds() < -40 * 3600:
                 continue
-            abs_d = abs(delta)
-            prev = best_for_hhmm.get(hhmm)
-            cand_key = (abs_d, -slot.timestamp())
-            if prev is None or cand_key < (prev[0], -prev[1].timestamp()):
-                best_for_hhmm[hhmm] = (abs_d, slot)
+            if best_slot is None or slot > best_slot:
+                best_slot = slot
+        if best_slot is not None:
+            per_hhmm[hhmm] = best_slot
 
-    ordered_hhmm = sorted(
-        best_for_hhmm.items(),
-        key=lambda kv: (kv[1][0], -kv[1][1].timestamp()),
-    )
-
+    # 観測時刻の新しい順に HEAD し、取れたうちで最も新しい画像を採用（前日画像への取り違え防止）
+    ordered = sorted(per_hhmm.items(), key=lambda kv: kv[1], reverse=True)
     chosen_slot: datetime | None = None
     chosen_hhmm: str | None = None
-    # 近い順なので先頭数十件だけ実在確認（一覧表示時の HEAD 負荷を抑える）
-    for hhmm, (_abs_d, slot) in ordered_hhmm[:24]:
+    for hhmm, slot in ordered[:96]:
         url_try = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{hhmm}.jpg"
         if _msc_jpg_responds(url_try):
             chosen_slot, chosen_hhmm = slot, hhmm
             break
 
     if not chosen_slot or not chosen_hhmm:
-        pool = [t for t in half_times if int(t[2:4]) in (0, 30)] or half_times
-        today_slots = [
-            (
-                datetime.combine(
-                    ref.date(), datetime.strptime(t, "%H%M").time(), tzinfo=UTC
-                ),
-                t,
+        if not per_hhmm:
+            raise ValueError(
+                f"MSC {b}: 観測時刻候補がありません（一覧取得・時刻解釈を確認してください）"
             )
-            for t in pool
-        ]
-        past_ok = [(s, t) for s, t in today_slots if s <= ref + timedelta(minutes=3)]
-        if past_ok:
-            chosen_slot, chosen_hhmm = max(past_ok, key=lambda x: x[0])
-        else:
-            hhmm_fb = max(pool, key=lambda s: int(s))
-            chosen_hhmm = hhmm_fb
-            chosen_slot = datetime.combine(
-                ref.date(),
-                datetime.strptime(hhmm_fb, "%H%M").time(),
-                tzinfo=UTC,
-            )
+        hhmm_fb, slot_fb = max(per_hhmm.items(), key=lambda kv: kv[1])
+        chosen_slot, chosen_hhmm = slot_fb, hhmm_fb
 
     url = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{chosen_hhmm}.jpg"
     slot_iso = chosen_slot.strftime("%Y-%m-%dT%H:%MZ")
