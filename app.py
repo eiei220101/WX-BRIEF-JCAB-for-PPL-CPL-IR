@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-52-msc-jst-day-halfhour"
+PORTAL_BUILD = "20260413-53-msc-list-jstday-streamlit-url-cache"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -507,11 +507,13 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     """
     MSC「ひまわり画像（日本域）」``jpn_*_HHMM.jpg`` を選ぶ。
 
-    - 衛星は **30 分毎（日本時間の :00 / :30）**の観測枠とする。
-    - 候補の暦日は **ref を日本時間に直した「当日」**のみ（前日の同 HHMM は候補に入れない）。
-    - その枠のうち **取得時刻 ref より前で最も新しい**ものから順に URL を試し、最初に応答した画像を採用。
-    - ファイル名の HHMM は **その観測瞬間の UTC**（MSC の命名に合わせる）。
-    - 一覧 HTML は band の存在確認のみに使う。
+    - ``list_jpn.html`` に並ぶ **実際の HHMM**（概ね 10 分刻み）を候補の土台にする。
+      JST の :00/:30 だけを UTC に直しても、MSC の UTC ファイル名と一致しないことが多く、
+      その場合 **常に古い枠だけが HEAD で成功**してしまうため。
+    - 観測の暦日は **ref を日本時間に直した「当日」**に含まれる UTC 時刻に限定する。
+    - そのうち **ref より前で最も新しい**ものから URL を試し、最初に応答した画像を採用。
+    - 既定では一覧のうち **UTC 分が :00 または :30** の HHMM だけを使う。
+      当日分で 1 件も取れなければ **分刻みの制限なし**にフォールバックする。
     """
     b = re.sub(r"[^a-z0-9]", "", str(band).lower())
     if not b:
@@ -524,26 +526,41 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
 
     raw, _ = fetch_url(MSC_HIMI_LIST_JPN, timeout=45)
     text = raw.decode("utf-8", "replace")
-    if not re.search(rf"jpn_{re.escape(b)}_\d{{4}}\.jpg", text, re.I):
+    pat = re.compile(rf"jpn_{re.escape(b)}_(\d{{4}})\.jpg", re.I)
+    hhmm_all = sorted({m.group(1) for m in pat.finditer(text)})
+    if not hhmm_all:
         raise ValueError(f"MSC 一覧に jpn_{b}_HHMM.jpg が見つかりません")
 
     ref_jst = ref.astimezone(JST)
-    day_jst = ref_jst.date()
+    day_start = datetime.combine(ref_jst.date(), dt_time(0, 0), tzinfo=JST)
+    day_end = day_start + timedelta(days=1)
     skew = timedelta(seconds=90)
+    utc_days = {
+        day_start.astimezone(UTC).date(),
+        (day_end - timedelta(microseconds=1)).astimezone(UTC).date(),
+    }
 
-    slots_utc: list[datetime] = []
-    for hour in range(24):
-        for minute in (0, 30):
-            slot_jst = datetime.combine(day_jst, dt_time(hour, minute), tzinfo=JST)
-            slot_utc = slot_jst.astimezone(UTC)
-            if slot_utc <= ref + skew:
-                slots_utc.append(slot_utc)
+    def collect_candidates(hhmm_set: list[str]) -> list[datetime]:
+        out: set[datetime] = set()
+        for hhmm in hhmm_set:
+            hm = datetime.strptime(hhmm, "%H%M").time()
+            for uday in utc_days:
+                cand = datetime.combine(uday, hm, tzinfo=UTC)
+                if not (day_start <= cand.astimezone(JST) < day_end):
+                    continue
+                if cand > ref + skew:
+                    continue
+                out.add(cand)
+        return sorted(out, reverse=True)
 
-    slots_utc.sort(reverse=True)
+    half = [h for h in hhmm_all if int(h[2:4]) in (0, 30)]
+    ordered = collect_candidates(half)
+    if not ordered:
+        ordered = collect_candidates(hhmm_all)
 
     chosen_slot: datetime | None = None
     chosen_hhmm: str | None = None
-    for slot_utc in slots_utc:
+    for slot_utc in ordered[:96]:
         hhmm = slot_utc.strftime("%H%M")
         url_try = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{hhmm}.jpg"
         if _msc_jpg_responds(url_try):
@@ -552,7 +569,7 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
 
     if not chosen_slot or not chosen_hhmm:
         raise ValueError(
-            f"MSC {b}: 当日(JST)の:00/:30枠で、取得時刻以前の画像が見つかりません"
+            f"MSC {b}: 当日(JST)内で、取得時刻以前の応答画像が見つかりません"
         )
 
     url = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{chosen_hhmm}.jpg"

@@ -188,15 +188,15 @@ def _render_charts_zip(cfg: dict) -> None:
 
 
 @st.cache_data(ttl=120)
-def _cached_item_bytes(index: int) -> tuple[bytes | None, str | None, str]:
-    """単体資料のバイト列（失敗時は None, エラー文）。"""
+def _cached_item_bytes(index: int, url: str) -> tuple[bytes | None, str | None, str]:
+    """単体資料のバイト列（失敗時は None, エラー文）。`url` はキャッシュキー用（衛星の可変 URL で古い結果を避ける）。"""
     cfg = wx.load_config()
     item, err = wx.fetch_one_expanded_item(cfg, index, None)
     if err or not item:
         return None, None, err or "項目がありません"
-    url = item.get("url")
+    item_url = item.get("url")
     fname = item.get("filename") or "download.bin"
-    if not url:
+    if not item_url:
         return None, fname, "URL なし"
     try:
         data, _ct = wx.fetch_item_bytes(item)
@@ -221,7 +221,7 @@ def _render_file_list(cfg: dict) -> None:
             if not url:
                 st.write(f"**{name}** （URLなし）")
                 continue
-            data, fn, err = _cached_item_bytes(idx)
+            data, fn, err = _cached_item_bytes(idx, str(url))
             if err:
                 st.write(f"**{name}** — {err}")
             elif data:
