@@ -9,7 +9,13 @@
     "password": ""
   },
   "open_browser": true,
-  "items": [],
+  "items": [
+    {
+      "filename": "短期予報解説資料_最新.pdf",
+      "url": "https://www.data.jma.go.jp/yoho/data/jishin/kaisetsu_tanki_latest.pdf",
+      "comment": "気象庁「気象の専門家向け資料集」短期予報解説資料（常に最新版。案内ページ: https://www.jma.go.jp/jma/kishou/know/expert/index.html ）"
+    }
+  ],
   "jma_weather_map": {
     "enabled": false,
     "series": "near",
