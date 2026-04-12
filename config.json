@@ -92,14 +92,16 @@
   "jma_msc_himawari_japan": {
     "enabled": true,
     "bosai_map_zoom": 4,
+    "bosai_fetch_zoom": 8,
+    "bosai_himawari_mosaic_max_tiles": 400,
     "bosai_map_lat": 34.38,
     "bosai_map_lon": 141.592,
     "crop_logo_right": 108,
     "crop_logo_bottom": 44,
-    "print_dpi": 200,
+    "print_dpi": 300,
     "print_margin_mm": 5,
     "pdf_merge_resolution": 600,
-    "upscale_long_edge": 8192,
+    "upscale_long_edge": 16384,
     "products": [
       { "band": "tre", "label": "可視（真彩色）", "filename": "衛星画像可視.jpg" },
       { "band": "b13", "label": "赤外（B13）", "filename": "衛星画像赤外.jpg" }

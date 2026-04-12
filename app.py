@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-56-himawari-bosai-satimg"
+PORTAL_BUILD = "20260413-57-himawari-hires-mosaic"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -141,6 +141,7 @@ JMA_NOWC_TILE_ROOT = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
 JMA_NOWC_TARGET_N1 = f"{JMA_NOWC_TILE_ROOT}/targetTimes_N1.json"
 JMA_GSI_PALE_TILE = "https://www.jma.go.jp/tile/gsi/pale"
 WXBRIEFING_HRPNS_MOSAIC = "wxbriefing://jma-nowc-hrpns-mosaic"
+WXBRIEFING_HIMI_JP_MOSAIC = "wxbriefing://jma-himi-jp-mosaic"
 WXBRIEFING_AIRINFO_TAF_MERGED = "wxbriefing://jma-airinfo-taf-merged"
 JST = ZoneInfo("Asia/Tokyo")
 UTC = ZoneInfo("UTC")
@@ -490,37 +491,27 @@ def _fetch_himawari_jp_target_times() -> list:
     return data
 
 
-def msc_himawari_japan_jpg_url_for_ref_utc(
-    band: str,
-    ref_utc: datetime | None = None,
-    opts: dict | None = None,
-) -> tuple[str, str, str, datetime]:
-    """
-    気象庁防災「統合地図」のひまわり日本域に相当するタイル JPEG（satimg API）の URL。
-
-    ブラウザの可視（elem=color）相当は REP/ETC、赤外（elem=ir）は B13/TBB。
-    map.html は SPA のため直接は取得せず、targetTimes_jp.json とタイルパスで合成する。
-    """
-    opts = opts or {}
+def _himawari_jp_band_products(band: str) -> tuple[str, str, str]:
     b = re.sub(r"[^a-z0-9]", "", str(band).lower())
     if not b:
         raise ValueError("band が空です")
+    if b in ("tre", "color", "rep", "truecolor", "vis", "rgb"):
+        return "REP", "ETC", b
+    if b in ("b13", "ir", "infrared", "tbb"):
+        return "B13", "TBB", b
+    raise ValueError(
+        f"未対応の衛星 band: {band!r}（tre=可視相当・b13=赤外／統合地図 color・ir に対応）"
+    )
+
+
+def _himawari_jp_select_slot(ref_utc: datetime | None = None) -> tuple[str, str, datetime]:
+    """targetTimes_jp.json から取得時刻 ref 以前で最新の basetime / validtime / slot(UTC) を返す。"""
     ref = ref_utc or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
     else:
         ref = ref.astimezone(UTC)
     skew = timedelta(seconds=90)
-
-    if b in ("tre", "color", "rep", "truecolor", "vis", "rgb"):
-        prod_band, prod_name = "REP", "ETC"
-    elif b in ("b13", "ir", "infrared", "tbb"):
-        prod_band, prod_name = "B13", "TBB"
-    else:
-        raise ValueError(
-            f"未対応の衛星 band: {band!r}（tre=可視相当・b13=赤外／統合地図 color・ir に対応）"
-        )
-
     arr = _fetch_himawari_jp_target_times()
     picks: list[tuple[str, dict]] = []
     for it in arr:
@@ -558,6 +549,115 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     if len(vt) != 14 or not vt.isdigit():
         vt = bt
     slot_utc = _parse_jma_nowc_ts14_utc(bt)
+    return bt, vt, slot_utc
+
+
+def _himawari_jp_satimg_tile_url(
+    bt: str,
+    vt: str,
+    prod_band: str,
+    prod_name: str,
+    z: int,
+    x: int,
+    y: int,
+) -> str:
+    return f"{JMA_HIMI_JP_SATIMG_BASE}/{bt}/jp/{vt}/{prod_band}/{prod_name}/{z}/{x}/{y}.jpg"
+
+
+def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
+    """
+    統合地図の基準ズーム（z_base）の 1 タイルに相当する地図範囲を、より高いズーム（z_fetch）の
+    タイル格子で取得して 1 枚の JPEG に結合する（実解像度アップ）。
+    """
+    from PIL import Image
+
+    band = str(opts.get("band") or "")
+    bt = str(opts.get("basetime") or "")
+    vt = str(opts.get("validtime") or bt)
+    prod_band = str(opts.get("prod_band") or "")
+    prod_name = str(opts.get("prod_name") or "")
+    if not prod_band or not prod_name:
+        pb, pn, _ = _himawari_jp_band_products(band)
+        prod_band, prod_name = pb, pn
+    z_base = int(opts.get("z_base", 4))
+    z_fetch = int(opts.get("z_fetch", z_base))
+    lat = float(opts.get("lat", 34.38))
+    lon = float(opts.get("lon", 141.592))
+    z_base = max(0, min(12, z_base))
+    z_fetch = max(z_base, min(12, z_fetch))
+    dz = z_fetch - z_base
+    fact = 1 << dz
+    x0, y0 = _deg2num(lat, lon, z_base)
+    xs = list(range(x0 * fact, (x0 + 1) * fact))
+    ys = list(range(y0 * fact, (y0 + 1) * fact))
+    coords: list[tuple[int, int]] = [(tx, ty) for ty in ys for tx in xs]
+
+    def load_one(xy: tuple[int, int]) -> tuple[tuple[int, int], bytes | None]:
+        tx, ty = xy
+        u = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z_fetch, tx, ty)
+        try:
+            data, _ = fetch_url(u, timeout=35)
+            return (xy, data)
+        except Exception:
+            return (xy, None)
+
+    tile_map: dict[tuple[int, int], bytes | None] = {}
+    n_workers = min(32, max(6, len(coords)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futs = [ex.submit(load_one, xy) for xy in coords]
+        for fut in concurrent.futures.as_completed(futs):
+            xy, blob = fut.result()
+            tile_map[xy] = blob
+
+    first: bytes | None = None
+    for xy in coords:
+        b = tile_map.get(xy)
+        if b:
+            first = b
+            break
+    if not first:
+        raise ValueError("ひまわりモザイク: 取得できたタイルがありません")
+
+    im0 = Image.open(io.BytesIO(first))
+    tw, th = im0.size
+    tw = max(1, tw)
+    th = max(1, th)
+    out_w, out_h = tw * len(xs), th * len(ys)
+    canvas = Image.new("RGB", (out_w, out_h), (32, 36, 42))
+
+    for j, ty in enumerate(ys):
+        for i, tx in enumerate(xs):
+            blob = tile_map.get((tx, ty))
+            ox, oy = i * tw, j * th
+            if not blob:
+                continue
+            try:
+                im = Image.open(io.BytesIO(blob)).convert("RGB")
+                if im.size != (tw, th):
+                    im = im.resize((tw, th), Image.Resampling.LANCZOS)
+                canvas.paste(im, (ox, oy))
+            except Exception:
+                continue
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
+    return buf.getvalue()
+
+
+def msc_himawari_japan_jpg_url_for_ref_utc(
+    band: str,
+    ref_utc: datetime | None = None,
+    opts: dict | None = None,
+) -> tuple[str, str, str, datetime]:
+    """
+    気象庁防災「統合地図」のひまわり日本域に相当するタイル JPEG（satimg API）の URL。
+
+    ブラウザの可視（elem=color）相当は REP/ETC、赤外（elem=ir）は B13/TBB。
+    map.html は SPA のため直接は取得せず、targetTimes_jp.json とタイルパスで合成する。
+    """
+    opts = opts or {}
+    prod_band, prod_name, _b = _himawari_jp_band_products(band)
+    bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
 
     z = int(opts.get("bosai_map_zoom", opts.get("bosai_zoom", 4)))
     lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 34.38)))
@@ -565,9 +665,7 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     z = max(0, min(12, z))
     xtile, ytile = _deg2num(lat, lon, z)
 
-    url = (
-        f"{JMA_HIMI_JP_SATIMG_BASE}/{bt}/jp/{vt}/{prod_band}/{prod_name}/{z}/{xtile}/{ytile}.jpg"
-    )
+    url = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z, xtile, ytile)
     hhmm = slot_utc.strftime("%H%M")
     slot_iso = slot_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     return url, hhmm, slot_iso, slot_utc
@@ -780,7 +878,7 @@ def _msc_postprocess_jpg(
     lines = [ln for ln in lines if str(ln).strip()]
     if not lines:
         buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=94, optimize=True)
+        im.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
         return buf.getvalue()
 
     pad_x = 8
@@ -812,7 +910,7 @@ def _msc_postprocess_jpg(
     for i, line in enumerate(lines):
         draw.text((pad_x, y0 + i * line_h), line, fill=(10, 14, 22), font=font)
     buf = io.BytesIO()
-    out.save(buf, format="JPEG", quality=94, optimize=True)
+    out.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
     return buf.getvalue()
 
 
@@ -952,6 +1050,9 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
     if isinstance(url, str) and url.startswith(WXBRIEFING_HRPNS_MOSAIC):
         raw = build_hrpns_mosaic_png_bytes(item.get("hrpns_mosaic") or {})
         return raw, "image/png"
+    if isinstance(url, str) and url.startswith(WXBRIEFING_HIMI_JP_MOSAIC):
+        raw = build_himawari_jp_mosaic_jpeg_bytes(item.get("himawari_mosaic") or {})
+        return raw, "image/jpeg"
     if isinstance(url, str) and url.startswith(WXBRIEFING_AIRINFO_TAF_MERGED):
         raw = build_airinfo_taf_merged_pdf_bytes(item, timeout=timeout)
         return raw, "application/pdf"
@@ -1134,11 +1235,53 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             if not band:
                 warnings.append("jma_msc_himawari_japan: band なしの行をスキップしました")
                 continue
+            him_mosaic: dict | None = None
             try:
                 ref_utc = datetime.now(UTC)
-                jpg_url, hhmm, _slot_iso, slot_utc = msc_himawari_japan_jpg_url_for_ref_utc(
-                    str(band), ref_utc, msc
-                )
+                z_base = int(msc.get("bosai_map_zoom", msc.get("bosai_zoom", 4)))
+                z_base = max(0, min(12, z_base))
+                max_tiles = int(msc.get("bosai_himawari_mosaic_max_tiles", 400))
+                max_tiles = max(16, min(900, max_tiles))
+                if msc.get("bosai_himawari_single_tile"):
+                    z_fetch = z_base
+                elif msc.get("bosai_fetch_zoom") is not None:
+                    z_fetch = int(msc["bosai_fetch_zoom"])
+                else:
+                    z_fetch = min(z_base + 4, 8)
+                z_fetch = max(z_fetch, z_base)
+                z_fetch = min(12, z_fetch)
+                while z_fetch > z_base:
+                    dz = z_fetch - z_base
+                    ntiles = (1 << dz) ** 2
+                    if ntiles <= max_tiles:
+                        break
+                    z_fetch -= 1
+
+                bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
+                prod_band, prod_name, _ = _himawari_jp_band_products(str(band))
+                lat_m = float(msc.get("bosai_map_lat", msc.get("bosai_lat", 34.38)))
+                lon_m = float(msc.get("bosai_map_lon", msc.get("bosai_lon", 141.592)))
+
+                if z_fetch > z_base:
+                    him_mosaic = {
+                        "band": str(band),
+                        "basetime": bt,
+                        "validtime": vt,
+                        "prod_band": prod_band,
+                        "prod_name": prod_name,
+                        "z_base": z_base,
+                        "z_fetch": z_fetch,
+                        "lat": lat_m,
+                        "lon": lon_m,
+                    }
+                    q = urllib.parse.urlencode({"band": str(band), "bt": bt})
+                    jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
+                else:
+                    jpg_url, _hhmm, _slot_iso, slot_utc = (
+                        msc_himawari_japan_jpg_url_for_ref_utc(
+                            str(band), ref_utc, msc
+                        )
+                    )
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
                 continue
@@ -1157,48 +1300,49 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             dpi = min(600.0, max(96.0, dpi))
             up_edge = msc.get("upscale_long_edge")
             if up_edge is None:
-                up_edge_i: int | None = 8192
+                up_edge_i: int | None = 16384
             else:
                 up_edge_i = int(up_edge)
                 if up_edge_i <= 0:
                     up_edge_i = None
                 else:
-                    up_edge_i = min(8192, max(801, up_edge_i))
+                    up_edge_i = min(16384, max(801, up_edge_i))
             up_note = f"長辺最大 {up_edge_i}px 相当まで" if up_edge_i else "長辺拡大オフ"
             stem = Path(fn).stem if fn else f"himawari_jpn_{band}"
             ext = Path(fn).suffix if fn and Path(fn).suffix else ".jpg"
             if not ext.startswith("."):
                 ext = ".jpg"
             out_fn = f"{stem}_{slot_jst:%Y%m%d_%H%M}JST{ext}"
-            out.append(
-                {
-                    "filename": out_fn,
-                    "url": jpg_url,
-                    "pdf_image_resolution": dpi,
-                    "pdf_upscale_long_edge": up_edge_i,
-                    "msc_jst_header": True,
-                    "msc_header_lines": header_lines,
-                    "msc_crop_right": crop_r,
-                    "msc_crop_bottom": crop_b,
-                    "pdf_a4_fit": True,
-                    "pdf_a4_dpi": float(msc.get("print_dpi", 200)),
-                    "pdf_a4_margin_mm": float(msc.get("print_margin_mm", 5)),
-                    "comment": (
-                        "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
-                        "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
-                        "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
-                        "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
-                        "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
-                        f"観測 **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
-                        f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。"
-                        f"{label}。上端の帯は2行（日本時間／UTC）、幅に収まるよう字サイズを自動調整。"
-                        "**結合 PDF では A4（縦横は画像比で自動）1ページに全体を収め、余白付きで印刷向け**。"
-                        f"印刷 dpi={float(msc.get('print_dpi', 200)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
-                        f"拡大（結合前）: {up_note}。"
-                        "タイル 1 枚の解像度はズームに依存するため、拡大は補間です。"
-                    ),
-                }
-            )
+            row_item: dict = {
+                "filename": out_fn,
+                "url": jpg_url,
+                "pdf_image_resolution": dpi,
+                "pdf_upscale_long_edge": up_edge_i,
+                "msc_jst_header": True,
+                "msc_header_lines": header_lines,
+                "msc_crop_right": crop_r,
+                "msc_crop_bottom": crop_b,
+                "pdf_a4_fit": True,
+                "pdf_a4_dpi": float(msc.get("print_dpi", 300)),
+                "pdf_a4_margin_mm": float(msc.get("print_margin_mm", 5)),
+                "comment": (
+                    "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
+                    "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
+                    "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
+                    "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
+                    "高解像は bosai_map_zoom の 1 タイル範囲を、より高い bosai_fetch_zoom のタイル格子で結合（単タイルのみは bosai_himawari_single_tile: true）。"
+                    "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
+                    f"観測 **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
+                    f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。"
+                    f"{label}。上端の帯は2行（日本時間／UTC）、幅に収まるよう字サイズを自動調整。"
+                    "**結合 PDF では A4（縦横は画像比で自動）1ページに全体を収め、余白付きで印刷向け**。"
+                    f"印刷 dpi={float(msc.get('print_dpi', 300)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
+                    f"拡大（結合前）: {up_note}。"
+                ),
+            }
+            if him_mosaic is not None:
+                row_item["himawari_mosaic"] = him_mosaic
+            out.append(row_item)
 
     zm = cfg.get("jma_nowc_hrpns_mosaic")
     if isinstance(zm, dict) and zm.get("enabled"):
@@ -2348,7 +2492,7 @@ def page_html(cfg: dict) -> str:
     msc = cfg.get("jma_msc_himawari_japan")
     if isinstance(msc, dict) and msc.get("enabled"):
         auto_lines.append(
-            "防災統合地図相当のひまわり日本域タイル JPG（satimg・控えめトリミング・上端 JST/UTC・結合 PDF は A4 1枚）"
+            "防災統合地図相当のひまわり日本域（高ズームタイルの格子結合で高解像・satimg・上端 JST/UTC・A4 結合 PDF）"
         )
     zm = cfg.get("jma_nowc_hrpns_mosaic")
     if isinstance(zm, dict) and zm.get("enabled"):
