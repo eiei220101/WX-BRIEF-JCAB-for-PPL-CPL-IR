@@ -21,6 +21,8 @@ import urllib.request
 import urllib.parse
 import zipfile
 import concurrent.futures
+import shutil
+import subprocess
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT
@@ -43,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-48-caption-font-env-ttc"
+PORTAL_BUILD = "20260413-49-caption-font-jp-glyph-check"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -646,21 +648,78 @@ def _pil_open_rgba(data: bytes):
 
 
 def _try_pil_truetype(path: str, px: int):
-    """Pillow で TrueType / TTC を開く。.ttc は face index を順に試す。"""
+    """
+    Pillow で TrueType / TTC を開く。
+    NotoSansCJK*.ttc は言語面が複数あるため index を試し、日本語キャプションが描ける面だけ採用する。
+    """
     from PIL import ImageFont
 
     if not path or not os.path.isfile(path):
         return None
     lower = path.lower()
-    indices = list(range(10)) if lower.endswith(".ttc") else [0]
+    base = os.path.basename(lower)
+    is_cjk_ttc = lower.endswith(".ttc") and "notosanscjk" in base and "jp" not in base
+    if lower.endswith(".ttc"):
+        indices = list(range(18)) if is_cjk_ttc else list(range(10))
+    else:
+        indices = [0]
     for idx in indices:
         try:
-            return ImageFont.truetype(path, px, index=idx)
+            fnt = ImageFont.truetype(path, px, index=idx)
         except OSError:
             continue
         except Exception:
             continue
+        if is_cjk_ttc:
+            try:
+                bbox = fnt.getbbox("観測（日本時間）")
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+                if w <= 1 or h <= 1:
+                    continue
+            except Exception:
+                continue
+        return fnt
     return None
+
+
+def _linux_font_paths_fc_match() -> list[str]:
+    """fontconfig が返す日本向きフォント（Streamlit Cloud / Debian）。"""
+    if sys.platform == "win32":
+        return []
+    fc = shutil.which("fc-match")
+    if not fc:
+        return []
+    bad_sub = ("dejavu", "liberation", "bitstream", "ubuntu", "arial", "verdana")
+    patterns = (
+        "Noto Sans CJK JP:style=Regular",
+        "Noto Sans CJK JP",
+        "Noto Sans JP:style=Regular",
+        "Noto Sans JP",
+        "sans-serif:lang=ja",
+    )
+    out: list[str] = []
+    for pat in patterns:
+        try:
+            r = subprocess.run(
+                [fc, "-f", "%{file}", pat],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            line = (r.stdout or "").strip().splitlines()
+            p = line[0].strip() if line else ""
+            if not p or not os.path.isfile(p):
+                continue
+            pl = p.lower()
+            if any(s in pl for s in bad_sub):
+                continue
+            if p not in out:
+                out.append(p)
+        except Exception:
+            continue
+    return out
 
 
 def _hrpns_caption_font(px: int):
@@ -683,6 +742,8 @@ def _hrpns_caption_font(px: int):
             for f in sorted(fonts_dir.glob(f"*{ext}")):
                 candidates.append(str(f))
 
+    candidates.extend(_linux_font_paths_fc_match())
+
     windir = os.environ.get("WINDIR", r"C:\Windows")
     for name in (
         "meiryo.ttc",
@@ -694,16 +755,16 @@ def _hrpns_caption_font(px: int):
         "BIZ-UDGothicB.ttc",
     ):
         candidates.append(os.path.join(windir, "Fonts", name))
-    # Debian/Ubuntu（`fonts-noto-cjk` 等）。配列や版によってパス差があるので広めに列挙。
+    # Debian/Ubuntu: 日本語単体 OTF を CJK 集合 TTC より先に（TTC は言語面の取り違えで欠字しやすい）。
     candidates.extend(
         (
+            "/usr/share/fonts/opentype/noto/NotoSansJP-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansJP-Regular.otf",
-            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.otf",
-            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
         )
     )
     # macOS（パスは ASCII のみ。日本語名フォントは環境差が大きいので省略）
