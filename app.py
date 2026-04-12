@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-53-msc-list-jstday-streamlit-url-cache"
+PORTAL_BUILD = "20260413-54-msc-slot-utc-window-midnight-jst"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -145,7 +145,7 @@ UTC = ZoneInfo("UTC")
 _jma_list_cache: tuple[float, dict] | None = None
 JMA_LIST_CACHE_SEC = 60.0
 _msc_head_cache: dict[str, tuple[float, bool]] = {}
-MSC_HEAD_CACHE_SEC = 45.0
+MSC_HEAD_CACHE_SEC = 12.0
 
 
 def _header_safe_ascii(text: str, max_len: int = 2000) -> str:
@@ -159,7 +159,11 @@ def load_config() -> dict:
 
 
 def fetch_url(url: str, timeout: int = 60) -> tuple[bytes, str | None]:
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    headers = {"User-Agent": USER_AGENT}
+    if "data.jma.go.jp/mscweb/data/himawari" in url:
+        headers["Cache-Control"] = "max-age=0, no-cache"
+        headers["Pragma"] = "no-cache"
+    req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = resp.read()
         ctype = resp.headers.get("Content-Type")
@@ -186,15 +190,16 @@ def _msc_jpg_responds(url: str, timeout: int = 18) -> bool:
     ent = _msc_head_cache.get(url)
     if ent is not None and now - ent[0] < MSC_HEAD_CACHE_SEC:
         return ent[1]
+    hdr = {"User-Agent": USER_AGENT, "Cache-Control": "max-age=0, no-cache", "Pragma": "no-cache"}
     ok = False
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="HEAD")
+        req = urllib.request.Request(url, headers=hdr, method="HEAD")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             ok = 200 <= resp.status < 400
     except urllib.error.HTTPError as e:
         if e.code == 405:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+                req = urllib.request.Request(url, headers=hdr)
                 with urllib.request.urlopen(req, timeout=timeout) as resp:
                     ok = resp.read(64)[:2] == b"\xff\xd8"
             except Exception:
@@ -203,7 +208,7 @@ def _msc_jpg_responds(url: str, timeout: int = 18) -> bool:
             ok = False
     except Exception:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            req = urllib.request.Request(url, headers=hdr)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 ok = resp.read(64)[:2] == b"\xff\xd8"
         except Exception:
@@ -507,13 +512,14 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     """
     MSC「ひまわり画像（日本域）」``jpn_*_HHMM.jpg`` を選ぶ。
 
-    - ``list_jpn.html`` に並ぶ **実際の HHMM**（概ね 10 分刻み）を候補の土台にする。
-      JST の :00/:30 だけを UTC に直しても、MSC の UTC ファイル名と一致しないことが多く、
-      その場合 **常に古い枠だけが HEAD で成功**してしまうため。
-    - 観測の暦日は **ref を日本時間に直した「当日」**に含まれる UTC 時刻に限定する。
-    - そのうち **ref より前で最も新しい**ものから URL を試し、最初に応答した画像を採用。
-    - 既定では一覧のうち **UTC 分が :00 または :30** の HHMM だけを使う。
-      当日分で 1 件も取れなければ **分刻みの制限なし**にフォールバックする。
+    - 一覧の **実際の HHMM**（概ね 10 分刻み）を候補にする。
+    - ファイル名に日付が無いため、各 HHMM について **UTC の前日・当日・翌日**のうち
+      **取得時刻 ref 以前で最も新しい**観測時刻を 1 つに決める。
+    - **日本時間で日付が変わった直後**に、前日 23:30 などの最新枠が必要になる。
+      「JST の当日だけ」に絞るとここが落ちて **常に古い画像だけが残る**ため、
+      代わりに **ref の日本時間から最大 40 時間さかのぼった窓**に観測が入るものだけを採用する。
+    - 一覧の **すべての HHMM** を使う（10 分刻みの最新が :00/:30 以外であることがある）。
+    - 各 HHMM の解釈時刻の **新しい順**に HEAD し、最初に応答した URL を採用する。
     """
     b = re.sub(r"[^a-z0-9]", "", str(band).lower())
     if not b:
@@ -532,36 +538,34 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
         raise ValueError(f"MSC 一覧に jpn_{b}_HHMM.jpg が見つかりません")
 
     ref_jst = ref.astimezone(JST)
-    day_start = datetime.combine(ref_jst.date(), dt_time(0, 0), tzinfo=JST)
-    day_end = day_start + timedelta(days=1)
     skew = timedelta(seconds=90)
-    utc_days = {
-        day_start.astimezone(UTC).date(),
-        (day_end - timedelta(microseconds=1)).astimezone(UTC).date(),
-    }
+    win_lo = ref_jst - timedelta(hours=40)
+    win_hi = ref_jst + timedelta(minutes=5)
+    ref_d = ref.date()
 
-    def collect_candidates(hhmm_set: list[str]) -> list[datetime]:
-        out: set[datetime] = set()
-        for hhmm in hhmm_set:
-            hm = datetime.strptime(hhmm, "%H%M").time()
-            for uday in utc_days:
-                cand = datetime.combine(uday, hm, tzinfo=UTC)
-                if not (day_start <= cand.astimezone(JST) < day_end):
-                    continue
-                if cand > ref + skew:
-                    continue
-                out.add(cand)
-        return sorted(out, reverse=True)
+    def in_jst_wall_window(cand: datetime) -> bool:
+        cj = cand.astimezone(JST)
+        return win_lo <= cj <= win_hi
 
-    half = [h for h in hhmm_all if int(h[2:4]) in (0, 30)]
-    ordered = collect_candidates(half)
-    if not ordered:
-        ordered = collect_candidates(hhmm_all)
+    per_hhmm: dict[str, datetime] = {}
+    for hhmm in hhmm_all:
+        hm = datetime.strptime(hhmm, "%H%M").time()
+        best: datetime | None = None
+        for day in (ref_d - timedelta(days=1), ref_d, ref_d + timedelta(days=1)):
+            cand = datetime.combine(day, hm, tzinfo=UTC)
+            if cand > ref + skew:
+                continue
+            if not in_jst_wall_window(cand):
+                continue
+            if best is None or cand > best:
+                best = cand
+        if best is not None:
+            per_hhmm[hhmm] = best
 
+    ordered = sorted(per_hhmm.items(), key=lambda kv: kv[1], reverse=True)
     chosen_slot: datetime | None = None
     chosen_hhmm: str | None = None
-    for slot_utc in ordered[:96]:
-        hhmm = slot_utc.strftime("%H%M")
+    for hhmm, slot_utc in ordered[:120]:
         url_try = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{hhmm}.jpg"
         if _msc_jpg_responds(url_try):
             chosen_slot, chosen_hhmm = slot_utc, hhmm
@@ -569,7 +573,7 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
 
     if not chosen_slot or not chosen_hhmm:
         raise ValueError(
-            f"MSC {b}: 当日(JST)内で、取得時刻以前の応答画像が見つかりません"
+            f"MSC {b}: 直近の観測枠で、取得時刻以前の応答画像が見つかりません"
         )
 
     url = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{chosen_hhmm}.jpg"

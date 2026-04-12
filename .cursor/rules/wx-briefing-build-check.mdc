@@ -1,0 +1,11 @@
+---
+description: Streamlit / WX Briefing の「最新ビルド」確認と PORTAL_BUILD の扱い
+globs: "**/*.{py,md,json}"
+alwaysApply: true
+---
+
+# 最新ビルド（PORTAL_BUILD）
+
+- **真実のソース**はリポジトリ直下の `app.py` の **`PORTAL_BUILD = "…"`** 1 行だけ。会話や記憶の文字列ではなく、**いまのファイルを読んだ値**をユーザーに伝える。
+- Streamlit では **`ビルド: … · Streamlit 版`** のキャプションがこの定数を表示している。**その文字列が GitHub の `app.py` の `PORTAL_BUILD` と一致していれば**、公開アプリはそのコミットの最新版とみなせる。
+- ユーザーが「最新か」「ビルドは？」と聞いたら、**上記の読み方**を短く案内し、必要なら `app.py` の該当行を引用する。

@@ -246,7 +246,10 @@ def main() -> None:
     cfg = _cfg_cached()
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
-    st.caption(f"ビルド: {wx.PORTAL_BUILD} · Streamlit 版")
+    st.caption(
+        f"ビルド: {wx.PORTAL_BUILD} · Streamlit 版"
+        " — この文字列が GitHub の **app.py** 内の **`PORTAL_BUILD`** と同じなら、公開中は最新コードです。"
+    )
 
     with st.sidebar:
         st.subheader("アカウント")
