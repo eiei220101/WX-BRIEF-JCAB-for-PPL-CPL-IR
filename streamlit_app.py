@@ -24,6 +24,11 @@ if str(_ROOT) not in sys.path:
 
 import app as wx  # noqa: E402
 
+# 衛星などのキャプション文字は app.py の Pillow（_hrpns_caption_font）で描画する。
+# Streamlit Cloud: リポジトリ直下の packages.txt で fonts-noto-cjk を入れる。
+# 自前フォント: wx-briefing-portal/fonts/ に .otf/.ttf を置くか、環境変数
+# WX_BRIEFING_CAPTION_FONT に絶対パスを指定する。
+
 
 def _auth_expected() -> tuple[str, str]:
     """Streamlit Secrets 優先、なければ config.json の http_auth。"""

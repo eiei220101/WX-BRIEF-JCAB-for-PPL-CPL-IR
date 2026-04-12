@@ -43,7 +43,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260412-46-http-basic-auth"
+PORTAL_BUILD = "20260413-48-caption-font-env-ttc"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -645,17 +645,82 @@ def _pil_open_rgba(data: bytes):
     return im.convert("RGBA")
 
 
-def _hrpns_caption_font(px: int):
+def _try_pil_truetype(path: str, px: int):
+    """Pillow で TrueType / TTC を開く。.ttc は face index を順に試す。"""
     from PIL import ImageFont
 
+    if not path or not os.path.isfile(path):
+        return None
+    lower = path.lower()
+    indices = list(range(10)) if lower.endswith(".ttc") else [0]
+    for idx in indices:
+        try:
+            return ImageFont.truetype(path, px, index=idx)
+        except OSError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def _hrpns_caption_font(px: int):
+    """
+    衛星・ナウキャスト等の画像キャプション用（Streamlit でも同じ経路）。
+
+    優先順: 環境変数 WX_BRIEFING_CAPTION_FONT → リポジトリ内 fonts/*.otf|ttf|ttc
+    → Windows 標準 → Linux（fonts-noto-cjk 等）→ macOS。無いと日本語が豆腐になる。
+    """
+    from PIL import ImageFont
+
+    candidates: list[str] = []
+    env_p = (os.environ.get("WX_BRIEFING_CAPTION_FONT") or "").strip()
+    if env_p:
+        candidates.append(env_p)
+
+    fonts_dir = Path(__file__).resolve().parent / "fonts"
+    if fonts_dir.is_dir():
+        for ext in (".otf", ".ttf", ".ttc"):
+            for f in sorted(fonts_dir.glob(f"*{ext}")):
+                candidates.append(str(f))
+
     windir = os.environ.get("WINDIR", r"C:\Windows")
-    for name in ("meiryo.ttc", "YuGothM.ttc", "msgothic.ttc", "msyh.ttc"):
-        p = os.path.join(windir, "Fonts", name)
-        if os.path.isfile(p):
-            try:
-                return ImageFont.truetype(p, px)
-            except Exception:
-                continue
+    for name in (
+        "meiryo.ttc",
+        "YuGothM.ttc",
+        "YuGothR.ttc",
+        "msgothic.ttc",
+        "msyh.ttc",
+        "BIZ-UDGothicR.ttc",
+        "BIZ-UDGothicB.ttc",
+    ):
+        candidates.append(os.path.join(windir, "Fonts", name))
+    # Debian/Ubuntu（`fonts-noto-cjk` 等）。配列や版によってパス差があるので広めに列挙。
+    candidates.extend(
+        (
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansJP-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansJP-Regular.ttf",
+        )
+    )
+    # macOS（パスは ASCII のみ。日本語名フォントは環境差が大きいので省略）
+    candidates.extend(
+        (
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/Library/Fonts/Arial Unicode.ttf",
+        )
+    )
+    seen: set[str] = set()
+    for p in candidates:
+        if not p or p in seen:
+            continue
+        seen.add(p)
+        font = _try_pil_truetype(p, px)
+        if font is not None:
+            return font
     return ImageFont.load_default()
 
 
