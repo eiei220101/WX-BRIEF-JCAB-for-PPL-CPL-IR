@@ -1,0 +1,120 @@
+{
+  "title": "WX Briefing 資料ダウンロード",
+  "port": 18876,
+  "listen_host": "127.0.0.1",
+  "http_auth": {
+    "enabled": true,
+    "realm": "WX Briefing",
+    "username": "FO15",
+    "password": "ishikawa"
+  },
+  "open_browser": true,
+  "items": [],
+  "jma_weather_map": {
+    "enabled": false,
+    "series": "near",
+    "monochrome": false,
+    "filename_prev_day_21": "地上天気図_前日21時JST.png",
+    "filename_today_03": "地上天気図_当日03時JST.png",
+    "filename_today_21_forecast": "予想地上天気図_当日21時JST.png"
+  },
+  "jma_quickmonthly_prevnight21_asas": {
+    "enabled": true,
+    "color": true,
+    "filename": "ASAS　実況地上天気図_昨晩21時JST_アジア太平洋域_過去.pdf"
+  },
+  "jma_fsas24_asia_pdf": {
+    "enabled": true,
+    "color": true,
+    "filename": "FSAS　予想地上天気図_今夜21時JST_アジア太平洋域_24h予想.pdf"
+  },
+  "jma_quickdaily_asas": {
+    "enabled": true,
+    "show": null,
+    "hour_jst": 3,
+    "color": true,
+    "filename": "ASAS　実況地上天気図_今朝03時JST_アジア太平洋域_実況.pdf"
+  },
+  "jma_numericmap_upper": {
+    "enabled": true,
+    "utc_hour": "12",
+    "products": [
+      { "id": "aupq35", "filename": "AUPQ35_12UTC.pdf" },
+      { "id": "aupq78", "filename": "AUPQ78_12UTC.pdf" }
+    ]
+  },
+  "jma_numericmap_nwp": {
+    "enabled": true,
+    "products": [
+      { "id": "fxfe502" },
+      { "id": "fxfe5782" },
+      { "id": "fxjp854" }
+    ]
+  },
+  "jma_airinfo_fbjp": {
+    "enabled": true,
+    "filename": "FBJP_国内悪天予想図.png"
+  },
+  "jma_airinfo_low_level_sigwx": {
+    "enabled": true,
+    "area": "fbsn",
+    "forecast_type": "39",
+    "filename": "下層悪天予想図_東北_時系列.png"
+  },
+  "jma_airinfo_low_level_detailed_sigwx": {
+    "enabled": true,
+    "products": [
+      { "fig": "Fig206", "filename": "下層悪天予想図_詳細_福島.png", "label": "福島" },
+      { "fig": "Fig204", "filename": "下層悪天予想図_詳細_宮城.png", "label": "宮城" },
+      { "fig": "Fig501", "filename": "下層悪天予想図_詳細_新潟.png", "label": "新潟" }
+    ]
+  },
+  "jma_airinfo_fxjp106_cross_section": {
+    "enabled": true,
+    "utc_hour": "00",
+    "filename": "FXJP106_国内航空路予想断面図.png"
+  },
+  "jma_airinfo_taf": {
+    "enabled": true,
+    "image_pdf_resolution": 120,
+    "products": [
+      { "icao": "RJSF", "filename": "飛行場時系列予報_福島空港_PART1-2.pdf" },
+      { "icao": "RJSS", "filename": "飛行場時系列予報_仙台空港_PART1-2.pdf" },
+      { "icao": "RJSN", "filename": "飛行場時系列予報_新潟空港_PART1-2.pdf" }
+    ]
+  },
+  "jma_msc_himawari_japan": {
+    "enabled": true,
+    "crop_logo_right": 108,
+    "crop_logo_bottom": 44,
+    "print_dpi": 200,
+    "print_margin_mm": 5,
+    "pdf_merge_resolution": 600,
+    "upscale_long_edge": 8192,
+    "products": [
+      { "band": "tre", "label": "可視（真彩色）", "filename": "衛星画像可視.jpg" },
+      { "band": "b13", "label": "赤外（B13）", "filename": "衛星画像赤外.jpg" }
+    ]
+  },
+  "jma_nowc_hrpns_mosaic": {
+    "enabled": true,
+    "filename": "レーダーエコー.png",
+    "zoom": 6,
+    "basemap": true
+  },
+  "metar_taf_fetch": {
+    "enabled": true,
+    "source": "imoc",
+    "airports": [
+      { "icao": "RJSF", "label": "福島空港" },
+      { "icao": "RJSS", "label": "仙台空港" },
+      { "icao": "RJSN", "label": "新潟空港" },
+      { "icao": "RJSC", "label": "山形空港" },
+      { "icao": "RJSI", "label": "花巻空港" },
+      { "icao": "RJSY", "label": "庄内空港" },
+      { "icao": "RJTU", "label": "宇都宮飛行場" },
+      { "icao": "RJAH", "label": "百里飛行場（茨城空港）" },
+      { "icao": "RJSK", "label": "秋田空港" }
+    ]
+  }
+}
