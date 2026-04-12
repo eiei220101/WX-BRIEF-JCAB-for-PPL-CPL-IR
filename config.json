@@ -3,7 +3,7 @@
   "port": 18876,
   "listen_host": "127.0.0.1",
   "http_auth": {
-    "enabled": true,
+    "enabled": false,
     "realm": "WX Briefing",
     "username": "FO15",
     "password": "ishikawa"
