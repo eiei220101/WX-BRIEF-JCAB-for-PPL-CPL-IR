@@ -92,8 +92,14 @@
   "jma_msc_himawari_japan": {
     "enabled": true,
     "bosai_map_zoom": 4,
-    "bosai_fetch_zoom": 8,
+    "bosai_fetch_zoom": 6,
     "bosai_himawari_mosaic_max_tiles": 400,
+    "bosai_himawari_bbox": {
+      "lon_w": 118.0,
+      "lon_e": 151.5,
+      "lat_s": 21.0,
+      "lat_n": 46.6
+    },
     "bosai_map_lat": 34.38,
     "bosai_map_lon": 141.592,
     "crop_logo_right": 108,

@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-57-himawari-hires-mosaic"
+PORTAL_BUILD = "20260413-58-himawari-bbox-z6-cap"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -137,6 +137,8 @@ JMA_HIMI_JP_TARGET_TIMES = (
     "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_jp.json"
 )
 JMA_HIMI_JP_SATIMG_BASE = "https://www.jma.go.jp/bosai/himawari/data/satimg"
+# 防災ひまわり satimg（jp）の実タイルは z=6 まで。z=7 以降は 404 となるためモザイクも 6 で打ち止め。
+HIMI_JP_TILE_MAX_ZOOM = 6
 JMA_NOWC_TILE_ROOT = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
 JMA_NOWC_TARGET_N1 = f"{JMA_NOWC_TILE_ROOT}/targetTimes_N1.json"
 JMA_GSI_PALE_TILE = "https://www.jma.go.jp/tile/gsi/pale"
@@ -166,6 +168,8 @@ def fetch_url(url: str, timeout: int = 60) -> tuple[bytes, str | None]:
     if "data.jma.go.jp/mscweb/data/himawari" in url or "jma.go.jp/bosai/himawari/data/satimg" in url:
         headers["Cache-Control"] = "max-age=0, no-cache"
         headers["Pragma"] = "no-cache"
+    if "jma.go.jp/bosai/himawari/data/satimg" in url:
+        headers["Referer"] = "https://www.jma.go.jp/"
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         data = resp.read()
@@ -564,10 +568,45 @@ def _himawari_jp_satimg_tile_url(
     return f"{JMA_HIMI_JP_SATIMG_BASE}/{bt}/jp/{vt}/{prod_band}/{prod_name}/{z}/{x}/{y}.jpg"
 
 
+def _himawari_jp_fetch_tile_jpeg(
+    bt: str,
+    vt: str,
+    prod_band: str,
+    prod_name: str,
+    z: int,
+    x: int,
+    y_xyz: int,
+) -> bytes | None:
+    """XYZ と TMS の y を試し、JPEG マジックで検証する。"""
+    n = 1 << z
+    y_candidates = [y_xyz, n - 1 - y_xyz]
+    seen: set[int] = set()
+    for y in y_candidates:
+        if y in seen or y < 0 or y >= n:
+            continue
+        seen.add(y)
+        u = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z, x, y)
+        for _attempt in range(3):
+            try:
+                data, _ = fetch_url(u, timeout=28)
+                if (
+                    isinstance(data, bytes)
+                    and len(data) > 500
+                    and data[:2] == b"\xff\xd8"
+                ):
+                    return data
+            except Exception:
+                pass
+            time.sleep(0.1 * (_attempt + 1))
+    return None
+
+
 def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
-    統合地図の基準ズーム（z_base）の 1 タイルに相当する地図範囲を、より高いズーム（z_fetch）の
-    タイル格子で取得して 1 枚の JPEG に結合する（実解像度アップ）。
+    緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
+
+    樺太南端〜台湾・日本列島を収める用途では lon_w〜lon_e / lat_s〜lat_n を
+    config の bosai_himawari_bbox 等で指定する。
     """
     from PIL import Image
 
@@ -579,30 +618,49 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     if not prod_band or not prod_name:
         pb, pn, _ = _himawari_jp_band_products(band)
         prod_band, prod_name = pb, pn
-    z_base = int(opts.get("z_base", 4))
-    z_fetch = int(opts.get("z_fetch", z_base))
-    lat = float(opts.get("lat", 34.38))
-    lon = float(opts.get("lon", 141.592))
-    z_base = max(0, min(12, z_base))
-    z_fetch = max(z_base, min(12, z_fetch))
-    dz = z_fetch - z_base
-    fact = 1 << dz
-    x0, y0 = _deg2num(lat, lon, z_base)
-    xs = list(range(x0 * fact, (x0 + 1) * fact))
-    ys = list(range(y0 * fact, (y0 + 1) * fact))
+
+    lon_w = float(opts.get("lon_w", 118.0))
+    lon_e = float(opts.get("lon_e", 151.5))
+    lat_s = float(opts.get("lat_s", 21.0))
+    lat_n = float(opts.get("lat_n", 46.6))
+    if lon_e <= lon_w or lat_n <= lat_s:
+        raise ValueError("ひまわりモザイク: 緯度経度の範囲が不正です")
+
+    max_tiles = int(opts.get("max_tiles", 400))
+    max_tiles = max(16, min(900, max_tiles))
+
+    z_req = int(opts.get("z_fetch", HIMI_JP_TILE_MAX_ZOOM))
+    z_req = max(3, min(HIMI_JP_TILE_MAX_ZOOM, z_req))
+
+    z = z_req
+    x_min = x_max = y_min = y_max = 0
+    ntot = 0
+    while z >= 3:
+        x_min, x_max, y_min, y_max = _jma_tile_range_lonlat(
+            z, lon_w, lon_e, lat_s, lat_n
+        )
+        ntot = (x_max - x_min + 1) * (y_max - y_min + 1)
+        if ntot <= max_tiles:
+            break
+        z -= 1
+    if z < 3 or ntot > max_tiles:
+        raise ValueError(
+            "ひまわりモザイク: タイル枚数が多すぎます（範囲を狭めるか max_tiles を上げてください）"
+        )
+
+    xs = list(range(x_min, x_max + 1))
+    ys = list(range(y_min, y_max + 1))
     coords: list[tuple[int, int]] = [(tx, ty) for ty in ys for tx in xs]
 
     def load_one(xy: tuple[int, int]) -> tuple[tuple[int, int], bytes | None]:
         tx, ty = xy
-        u = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z_fetch, tx, ty)
-        try:
-            data, _ = fetch_url(u, timeout=35)
-            return (xy, data)
-        except Exception:
-            return (xy, None)
+        blob = _himawari_jp_fetch_tile_jpeg(
+            bt, vt, prod_band, prod_name, z, tx, ty
+        )
+        return (xy, blob)
 
     tile_map: dict[tuple[int, int], bytes | None] = {}
-    n_workers = min(32, max(6, len(coords)))
+    n_workers = min(16, max(4, len(coords)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = [ex.submit(load_one, xy) for xy in coords]
         for fut in concurrent.futures.as_completed(futs):
@@ -616,7 +674,9 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
             first = b
             break
     if not first:
-        raise ValueError("ひまわりモザイク: 取得できたタイルがありません")
+        raise ValueError(
+            "ひまわりモザイク: 取得できたタイルがありません（ズームや時刻、通信を確認してください）"
+        )
 
     im0 = Image.open(io.BytesIO(first))
     tw, th = im0.size
@@ -662,7 +722,7 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     z = int(opts.get("bosai_map_zoom", opts.get("bosai_zoom", 4)))
     lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 34.38)))
     lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 141.592)))
-    z = max(0, min(12, z))
+    z = max(0, min(HIMI_JP_TILE_MAX_ZOOM, z))
     xtile, ytile = _deg2num(lat, lon, z)
 
     url = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z, xtile, ytile)
@@ -1238,50 +1298,48 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             him_mosaic: dict | None = None
             try:
                 ref_utc = datetime.now(UTC)
-                z_base = int(msc.get("bosai_map_zoom", msc.get("bosai_zoom", 4)))
-                z_base = max(0, min(12, z_base))
                 max_tiles = int(msc.get("bosai_himawari_mosaic_max_tiles", 400))
                 max_tiles = max(16, min(900, max_tiles))
-                if msc.get("bosai_himawari_single_tile"):
-                    z_fetch = z_base
-                elif msc.get("bosai_fetch_zoom") is not None:
-                    z_fetch = int(msc["bosai_fetch_zoom"])
+                bbox = msc.get("bosai_himawari_bbox")
+                if isinstance(bbox, dict):
+                    lon_w = float(bbox.get("lon_w", 118.0))
+                    lon_e = float(bbox.get("lon_e", 151.5))
+                    lat_s = float(bbox.get("lat_s", 21.0))
+                    lat_n = float(bbox.get("lat_n", 46.6))
                 else:
-                    z_fetch = min(z_base + 4, 8)
-                z_fetch = max(z_fetch, z_base)
-                z_fetch = min(12, z_fetch)
-                while z_fetch > z_base:
-                    dz = z_fetch - z_base
-                    ntiles = (1 << dz) ** 2
-                    if ntiles <= max_tiles:
-                        break
-                    z_fetch -= 1
+                    lon_w = float(msc.get("bosai_him_lon_w", 118.0))
+                    lon_e = float(msc.get("bosai_him_lon_e", 151.5))
+                    lat_s = float(msc.get("bosai_him_lat_s", 21.0))
+                    lat_n = float(msc.get("bosai_him_lat_n", 46.6))
 
-                bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
-                prod_band, prod_name, _ = _himawari_jp_band_products(str(band))
-                lat_m = float(msc.get("bosai_map_lat", msc.get("bosai_lat", 34.38)))
-                lon_m = float(msc.get("bosai_map_lon", msc.get("bosai_lon", 141.592)))
-
-                if z_fetch > z_base:
+                if msc.get("bosai_himawari_single_tile"):
+                    jpg_url, _hhmm, _slot_iso, slot_utc = (
+                        msc_himawari_japan_jpg_url_for_ref_utc(
+                            str(band), ref_utc, msc
+                        )
+                    )
+                else:
+                    bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
+                    prod_band, prod_name, _ = _himawari_jp_band_products(str(band))
+                    z_fetch = int(
+                        msc.get("bosai_fetch_zoom", HIMI_JP_TILE_MAX_ZOOM)
+                    )
+                    z_fetch = max(3, min(HIMI_JP_TILE_MAX_ZOOM, z_fetch))
                     him_mosaic = {
                         "band": str(band),
                         "basetime": bt,
                         "validtime": vt,
                         "prod_band": prod_band,
                         "prod_name": prod_name,
-                        "z_base": z_base,
+                        "lon_w": lon_w,
+                        "lon_e": lon_e,
+                        "lat_s": lat_s,
+                        "lat_n": lat_n,
                         "z_fetch": z_fetch,
-                        "lat": lat_m,
-                        "lon": lon_m,
+                        "max_tiles": max_tiles,
                     }
                     q = urllib.parse.urlencode({"band": str(band), "bt": bt})
                     jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
-                else:
-                    jpg_url, _hhmm, _slot_iso, slot_utc = (
-                        msc_himawari_japan_jpg_url_for_ref_utc(
-                            str(band), ref_utc, msc
-                        )
-                    )
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
                 continue
@@ -1330,7 +1388,8 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
                     "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
                     "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
-                    "高解像は bosai_map_zoom の 1 タイル範囲を、より高い bosai_fetch_zoom のタイル格子で結合（単タイルのみは bosai_himawari_single_tile: true）。"
+                    "モザイクは bosai_himawari_bbox（既定: 樺太南端〜台湾・日本域）を Web Mercator タイルで結合。"
+                    "satimg は z=6 まで（それ以上は 404）。単タイルのみは bosai_himawari_single_tile: true。"
                     "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
                     f"観測 **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
                     f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。"
@@ -2492,7 +2551,7 @@ def page_html(cfg: dict) -> str:
     msc = cfg.get("jma_msc_himawari_japan")
     if isinstance(msc, dict) and msc.get("enabled"):
         auto_lines.append(
-            "防災統合地図相当のひまわり日本域（高ズームタイルの格子結合で高解像・satimg・上端 JST/UTC・A4 結合 PDF）"
+            "防災統合地図相当のひまわり（bbox モザイク・satimg z≤6・上端 JST/UTC・A4 結合 PDF）"
         )
     zm = cfg.get("jma_nowc_hrpns_mosaic")
     if isinstance(zm, dict) and zm.get("enabled"):
