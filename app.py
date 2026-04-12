@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-54-msc-slot-utc-window-midnight-jst"
+PORTAL_BUILD = "20260413-56-himawari-bosai-satimg"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -133,8 +133,10 @@ JMA_AIRINFO_TAF_PNG_BASE = "https://www.data.jma.go.jp/airinfo/data/pict/taf/"
 # PDF では PART1→PART2 の順とするため、1 ページ目=QMCD98_、2 ページ目=QMCJ98_ とする。
 JMA_AIRINFO_TAF_PART1_PREFIX = "QMCD98_"
 JMA_AIRINFO_TAF_PART2_PREFIX = "QMCJ98_"
-MSC_HIMI_LIST_JPN = "https://www.data.jma.go.jp/mscweb/data/himawari/list_jpn.html"
-MSC_HIMI_IMG_JPN = "https://www.data.jma.go.jp/mscweb/data/himawari/img/jpn/"
+JMA_HIMI_JP_TARGET_TIMES = (
+    "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_jp.json"
+)
+JMA_HIMI_JP_SATIMG_BASE = "https://www.jma.go.jp/bosai/himawari/data/satimg"
 JMA_NOWC_TILE_ROOT = "https://www.jma.go.jp/bosai/jmatile/data/nowc"
 JMA_NOWC_TARGET_N1 = f"{JMA_NOWC_TILE_ROOT}/targetTimes_N1.json"
 JMA_GSI_PALE_TILE = "https://www.jma.go.jp/tile/gsi/pale"
@@ -144,8 +146,8 @@ JST = ZoneInfo("Asia/Tokyo")
 UTC = ZoneInfo("UTC")
 _jma_list_cache: tuple[float, dict] | None = None
 JMA_LIST_CACHE_SEC = 60.0
-_msc_head_cache: dict[str, tuple[float, bool]] = {}
-MSC_HEAD_CACHE_SEC = 12.0
+_himawari_jp_times_cache: tuple[float, list] | None = None
+HIMI_JP_TIMES_CACHE_SEC = 25.0
 
 
 def _header_safe_ascii(text: str, max_len: int = 2000) -> str:
@@ -160,7 +162,7 @@ def load_config() -> dict:
 
 def fetch_url(url: str, timeout: int = 60) -> tuple[bytes, str | None]:
     headers = {"User-Agent": USER_AGENT}
-    if "data.jma.go.jp/mscweb/data/himawari" in url:
+    if "data.jma.go.jp/mscweb/data/himawari" in url or "jma.go.jp/bosai/himawari/data/satimg" in url:
         headers["Cache-Control"] = "max-age=0, no-cache"
         headers["Pragma"] = "no-cache"
     req = urllib.request.Request(url, headers=headers)
@@ -182,39 +184,6 @@ def _fmt_jst_utc(dt_utc: datetime) -> tuple[str, str]:
         jst.strftime("%Y-%m-%d %H:%M JST"),
         dt_utc.strftime("%Y-%m-%d %H:%M UTC"),
     )
-
-
-def _msc_jpg_responds(url: str, timeout: int = 18) -> bool:
-    """MSC 衛星 JPG が実際に取得できるか（半時スロットの未発表を除外）。短時間キャッシュする。"""
-    now = time.time()
-    ent = _msc_head_cache.get(url)
-    if ent is not None and now - ent[0] < MSC_HEAD_CACHE_SEC:
-        return ent[1]
-    hdr = {"User-Agent": USER_AGENT, "Cache-Control": "max-age=0, no-cache", "Pragma": "no-cache"}
-    ok = False
-    try:
-        req = urllib.request.Request(url, headers=hdr, method="HEAD")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            ok = 200 <= resp.status < 400
-    except urllib.error.HTTPError as e:
-        if e.code == 405:
-            try:
-                req = urllib.request.Request(url, headers=hdr)
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    ok = resp.read(64)[:2] == b"\xff\xd8"
-            except Exception:
-                ok = False
-        else:
-            ok = False
-    except Exception:
-        try:
-            req = urllib.request.Request(url, headers=hdr)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                ok = resp.read(64)[:2] == b"\xff\xd8"
-        except Exception:
-            ok = False
-    _msc_head_cache[url] = (now, ok)
-    return ok
 
 
 def _jma_parse_list_json(raw: bytes) -> dict:
@@ -506,21 +475,33 @@ def _jma_tile_range_lonlat(
     return x_min, x_max, y_min, y_max
 
 
+def _fetch_himawari_jp_target_times() -> list:
+    """防災ひまわり日本域タイル用 targetTimes_jp.json（短時間キャッシュ）。"""
+    global _himawari_jp_times_cache
+    now = time.time()
+    c = _himawari_jp_times_cache
+    if c is not None and (now - c[0]) < HIMI_JP_TIMES_CACHE_SEC:
+        return c[1]
+    raw, _ = fetch_url(JMA_HIMI_JP_TARGET_TIMES, timeout=35)
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, list):
+        raise ValueError("targetTimes_jp.json: トップが配列ではありません")
+    _himawari_jp_times_cache = (now, data)
+    return data
+
+
 def msc_himawari_japan_jpg_url_for_ref_utc(
-    band: str, ref_utc: datetime | None = None
+    band: str,
+    ref_utc: datetime | None = None,
+    opts: dict | None = None,
 ) -> tuple[str, str, str, datetime]:
     """
-    MSC「ひまわり画像（日本域）」``jpn_*_HHMM.jpg`` を選ぶ。
+    気象庁防災「統合地図」のひまわり日本域に相当するタイル JPEG（satimg API）の URL。
 
-    - 一覧の **実際の HHMM**（概ね 10 分刻み）を候補にする。
-    - ファイル名に日付が無いため、各 HHMM について **UTC の前日・当日・翌日**のうち
-      **取得時刻 ref 以前で最も新しい**観測時刻を 1 つに決める。
-    - **日本時間で日付が変わった直後**に、前日 23:30 などの最新枠が必要になる。
-      「JST の当日だけ」に絞るとここが落ちて **常に古い画像だけが残る**ため、
-      代わりに **ref の日本時間から最大 40 時間さかのぼった窓**に観測が入るものだけを採用する。
-    - 一覧の **すべての HHMM** を使う（10 分刻みの最新が :00/:30 以外であることがある）。
-    - 各 HHMM の解釈時刻の **新しい順**に HEAD し、最初に応答した URL を採用する。
+    ブラウザの可視（elem=color）相当は REP/ETC、赤外（elem=ir）は B13/TBB。
+    map.html は SPA のため直接は取得せず、targetTimes_jp.json とタイルパスで合成する。
     """
+    opts = opts or {}
     b = re.sub(r"[^a-z0-9]", "", str(band).lower())
     if not b:
         raise ValueError("band が空です")
@@ -529,56 +510,67 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
         ref = ref.replace(tzinfo=UTC)
     else:
         ref = ref.astimezone(UTC)
-
-    raw, _ = fetch_url(MSC_HIMI_LIST_JPN, timeout=45)
-    text = raw.decode("utf-8", "replace")
-    pat = re.compile(rf"jpn_{re.escape(b)}_(\d{{4}})\.jpg", re.I)
-    hhmm_all = sorted({m.group(1) for m in pat.finditer(text)})
-    if not hhmm_all:
-        raise ValueError(f"MSC 一覧に jpn_{b}_HHMM.jpg が見つかりません")
-
-    ref_jst = ref.astimezone(JST)
     skew = timedelta(seconds=90)
-    win_lo = ref_jst - timedelta(hours=40)
-    win_hi = ref_jst + timedelta(minutes=5)
-    ref_d = ref.date()
 
-    def in_jst_wall_window(cand: datetime) -> bool:
-        cj = cand.astimezone(JST)
-        return win_lo <= cj <= win_hi
-
-    per_hhmm: dict[str, datetime] = {}
-    for hhmm in hhmm_all:
-        hm = datetime.strptime(hhmm, "%H%M").time()
-        best: datetime | None = None
-        for day in (ref_d - timedelta(days=1), ref_d, ref_d + timedelta(days=1)):
-            cand = datetime.combine(day, hm, tzinfo=UTC)
-            if cand > ref + skew:
-                continue
-            if not in_jst_wall_window(cand):
-                continue
-            if best is None or cand > best:
-                best = cand
-        if best is not None:
-            per_hhmm[hhmm] = best
-
-    ordered = sorted(per_hhmm.items(), key=lambda kv: kv[1], reverse=True)
-    chosen_slot: datetime | None = None
-    chosen_hhmm: str | None = None
-    for hhmm, slot_utc in ordered[:120]:
-        url_try = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{hhmm}.jpg"
-        if _msc_jpg_responds(url_try):
-            chosen_slot, chosen_hhmm = slot_utc, hhmm
-            break
-
-    if not chosen_slot or not chosen_hhmm:
+    if b in ("tre", "color", "rep", "truecolor", "vis", "rgb"):
+        prod_band, prod_name = "REP", "ETC"
+    elif b in ("b13", "ir", "infrared", "tbb"):
+        prod_band, prod_name = "B13", "TBB"
+    else:
         raise ValueError(
-            f"MSC {b}: 直近の観測枠で、取得時刻以前の応答画像が見つかりません"
+            f"未対応の衛星 band: {band!r}（tre=可視相当・b13=赤外／統合地図 color・ir に対応）"
         )
 
-    url = f"{MSC_HIMI_IMG_JPN}jpn_{b}_{chosen_hhmm}.jpg"
-    slot_iso = chosen_slot.strftime("%Y-%m-%dT%H:%M:%SZ")
-    return url, chosen_hhmm, slot_iso, chosen_slot
+    arr = _fetch_himawari_jp_target_times()
+    picks: list[tuple[str, dict]] = []
+    for it in arr:
+        if not isinstance(it, dict):
+            continue
+        bt = str(it.get("basetime") or "")
+        if len(bt) != 14 or not bt.isdigit():
+            continue
+        try:
+            slot = _parse_jma_nowc_ts14_utc(bt)
+        except ValueError:
+            continue
+        if slot > ref + skew:
+            continue
+        picks.append((bt, it))
+
+    use: dict
+    if picks:
+        use = max(picks, key=lambda t: t[0])[1]
+    else:
+        fall: list[tuple[str, dict]] = []
+        for it in arr:
+            if not isinstance(it, dict):
+                continue
+            bt = str(it.get("basetime") or "")
+            if len(bt) != 14 or not bt.isdigit():
+                continue
+            fall.append((bt, it))
+        if not fall:
+            raise ValueError("ひまわり targetTimes_jp.json に有効な basetime がありません")
+        use = max(fall, key=lambda t: t[0])[1]
+
+    bt = str(use["basetime"])
+    vt = str(use.get("validtime") or bt)
+    if len(vt) != 14 or not vt.isdigit():
+        vt = bt
+    slot_utc = _parse_jma_nowc_ts14_utc(bt)
+
+    z = int(opts.get("bosai_map_zoom", opts.get("bosai_zoom", 4)))
+    lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 34.38)))
+    lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 141.592)))
+    z = max(0, min(12, z))
+    xtile, ytile = _deg2num(lat, lon, z)
+
+    url = (
+        f"{JMA_HIMI_JP_SATIMG_BASE}/{bt}/jp/{vt}/{prod_band}/{prod_name}/{z}/{xtile}/{ytile}.jpg"
+    )
+    hhmm = slot_utc.strftime("%H%M")
+    slot_iso = slot_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return url, hhmm, slot_iso, slot_utc
 
 
 def nowc_latest_hrpns_basetime_validtime() -> tuple[str, str]:
@@ -1145,7 +1137,7 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             try:
                 ref_utc = datetime.now(UTC)
                 jpg_url, hhmm, _slot_iso, slot_utc = msc_himawari_japan_jpg_url_for_ref_utc(
-                    str(band), ref_utc
+                    str(band), ref_utc, msc
                 )
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
@@ -1173,7 +1165,7 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 else:
                     up_edge_i = min(8192, max(801, up_edge_i))
             up_note = f"長辺最大 {up_edge_i}px 相当まで" if up_edge_i else "長辺拡大オフ"
-            stem = Path(fn).stem if fn else f"MSC_himawari_jpn_{band}"
+            stem = Path(fn).stem if fn else f"himawari_jpn_{band}"
             ext = Path(fn).suffix if fn and Path(fn).suffix else ".jpg"
             if not ext.startswith("."):
                 ext = ".jpg"
@@ -1192,15 +1184,18 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "pdf_a4_dpi": float(msc.get("print_dpi", 200)),
                     "pdf_a4_margin_mm": float(msc.get("print_margin_mm", 5)),
                     "comment": (
-                        "気象庁衛星センター MSC「ひまわり（日本域）」。"
-                        "右下の MSC 付帯文字は控えめにトリミング（crop_logo_* で調整）。"
+                        "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
+                        "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
+                        "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
+                        "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
+                        "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
                         f"観測 **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
                         f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。"
                         f"{label}。上端の帯は2行（日本時間／UTC）、幅に収まるよう字サイズを自動調整。"
                         "**結合 PDF では A4（縦横は画像比で自動）1ページに全体を収め、余白付きで印刷向け**。"
                         f"印刷 dpi={float(msc.get('print_dpi', 200)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
                         f"拡大（結合前）: {up_note}。"
-                        "元画像は約 801px 幅のため拡大は補間です。"
+                        "タイル 1 枚の解像度はズームに依存するため、拡大は補間です。"
                     ),
                 }
             )
@@ -2353,7 +2348,7 @@ def page_html(cfg: dict) -> str:
     msc = cfg.get("jma_msc_himawari_japan")
     if isinstance(msc, dict) and msc.get("enabled"):
         auto_lines.append(
-            "MSC ひまわり日本域 JPG（控えめトリミング・上端に JST/UTC・結合 PDF は A4 1枚収め印刷向け）"
+            "防災統合地図相当のひまわり日本域タイル JPG（satimg・控えめトリミング・上端 JST/UTC・結合 PDF は A4 1枚）"
         )
     zm = cfg.get("jma_nowc_hrpns_mosaic")
     if isinstance(zm, dict) and zm.get("enabled"):

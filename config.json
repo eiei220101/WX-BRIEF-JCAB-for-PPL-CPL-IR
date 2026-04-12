@@ -91,6 +91,9 @@
   },
   "jma_msc_himawari_japan": {
     "enabled": true,
+    "bosai_map_zoom": 4,
+    "bosai_map_lat": 34.38,
+    "bosai_map_lon": 141.592,
     "crop_logo_right": 108,
     "crop_logo_bottom": 44,
     "print_dpi": 200,
