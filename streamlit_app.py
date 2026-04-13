@@ -272,15 +272,17 @@ def _render_metar_taf(cfg: dict) -> None:
                     '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                     unsafe_allow_html=True,
                 )
-                for ap in aps:
+                cols = st.columns(3)
+                for i, ap in enumerate(aps):
                     icao = ap["icao"]
                     lab = ap["label"]
-                    if st.checkbox(
-                        f"{lab} ({icao})",
-                        value=False,
-                        key=f"mt_ap_{icao}",
-                    ):
-                        selected.append(icao)
+                    with cols[i % 3]:
+                        if st.checkbox(
+                            f"{lab} ({icao})",
+                            value=False,
+                            key=f"mt_ap_{icao}",
+                        ):
+                            selected.append(icao)
             else:
                 cols = st.columns(3)
                 for i, ap in enumerate(aps):
@@ -372,14 +374,16 @@ def _render_charts_zip(cfg: dict) -> None:
                             '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                             unsafe_allow_html=True,
                         )
-                        for pr in plist:
+                        cols = st.columns(3)
+                        for i, pr in enumerate(plist):
                             icao = str(pr.get("icao")).strip().upper()
                             lab = str(pr.get("label") or pr.get("name") or icao).strip()
-                            st.checkbox(
-                                f"{lab}（{icao}）",
-                                value=False,
-                                key=f"merge_taf_ap_{icao}",
-                            )
+                            with cols[i % 3]:
+                                st.checkbox(
+                                    f"{lab}（{icao}）",
+                                    value=False,
+                                    key=f"merge_taf_ap_{icao}",
+                                )
                     else:
                         cols = st.columns(3)
                         for i, pr in enumerate(plist):
@@ -458,13 +462,15 @@ def _render_charts_zip(cfg: dict) -> None:
                             '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                             unsafe_allow_html=True,
                         )
-                        for dr in dlist:
+                        dc = st.columns(4)
+                        for i, dr in enumerate(dlist):
                             fk = dr["fig_key"]
-                            st.checkbox(
-                                str(dr["label"]).strip(),
-                                value=False,
-                                key=f"merge_dsig_{fk}",
-                            )
+                            with dc[i % 4]:
+                                st.checkbox(
+                                    str(dr["label"]).strip(),
+                                    value=False,
+                                    key=f"merge_dsig_{fk}",
+                                )
                     else:
                         dc = st.columns(4)
                         for i, dr in enumerate(dlist):
