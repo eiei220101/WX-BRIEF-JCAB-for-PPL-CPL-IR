@@ -152,20 +152,29 @@ def _render_metar_taf(cfg: dict) -> None:
     if not isinstance(block, dict) or not block.get("enabled") or not airports:
         return
     st.subheader("METAR・TAF")
-    st.caption("空港と種別を選び、PDF を生成します。")
-    cols = st.columns(3)
+    st.caption("空港と種別を選び、PDF を生成します（初期状態はすべてオフ）。")
     selected: list[str] = []
-    for i, ap in enumerate(airports):
-        icao = ap["icao"]
-        lab = ap["label"]
-        with cols[i % 3]:
-            if st.checkbox(f"{lab} ({icao})", key=f"mt_ap_{icao}"):
-                selected.append(icao)
+    for title, aps in wx.group_metar_taf_airports_by_region(airports):
+        if not aps:
+            continue
+        with st.container(border=True):
+            st.markdown(f"**{title}**")
+            cols = st.columns(3)
+            for i, ap in enumerate(aps):
+                icao = ap["icao"]
+                lab = ap["label"]
+                with cols[i % 3]:
+                    if st.checkbox(
+                        f"{lab} ({icao})",
+                        value=False,
+                        key=f"mt_ap_{icao}",
+                    ):
+                        selected.append(icao)
     c1, c2 = st.columns(2)
     with c1:
-        want_met = st.checkbox("METAR", value=True, key="mt_met")
+        want_met = st.checkbox("METAR", value=False, key="mt_met")
     with c2:
-        want_taf = st.checkbox("TAF", value=True, key="mt_taf")
+        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
     if st.button("METAR/TAF PDF を生成", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
@@ -205,7 +214,8 @@ def _render_charts_zip(cfg: dict) -> None:
     if isinstance(taf, dict) and taf.get("enabled"):
         st.markdown("**飛行場時系列予報**（結合 PDF に含める範囲）")
         st.caption(
-            "空港と PART1 / PART2 を選び、下の「結合 PDF を生成」に反映されます（全空港・PART1+2 のときは従来と同じ扱い）。"
+            "空港と PART1 / PART2 を選び、「結合 PDF を生成」に反映されます。"
+            " 初期状態はすべてオフです。全空港かつ PART1+2 をオンにすると従来どおりの展開になります。"
         )
         prows = [
             p
@@ -215,17 +225,28 @@ def _render_charts_zip(cfg: dict) -> None:
         if not prows:
             st.info("config の `jma_airinfo_taf.products` に ICAO を追加してください。")
         else:
-            cols = st.columns(3)
-            for i, pr in enumerate(prows):
-                icao = str(pr.get("icao")).strip().upper()
-                lab = str(pr.get("label") or pr.get("name") or icao).strip()
-                with cols[i % 3]:
-                    st.checkbox(f"{lab}（{icao}）", value=True, key=f"merge_taf_ap_{icao}")
+            gfn = getattr(wx, "group_taf_products_by_region", None)
+            blocks = gfn(prows) if callable(gfn) else [("対象空港", prows)]
+            for title, plist in blocks:
+                if not plist:
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"**{title}**")
+                    cols = st.columns(3)
+                    for i, pr in enumerate(plist):
+                        icao = str(pr.get("icao")).strip().upper()
+                        lab = str(pr.get("label") or pr.get("name") or icao).strip()
+                        with cols[i % 3]:
+                            st.checkbox(
+                                f"{lab}（{icao}）",
+                                value=False,
+                                key=f"merge_taf_ap_{icao}",
+                            )
             pc1, pc2 = st.columns(2)
             with pc1:
-                st.checkbox("PART1（QMCD98_）", value=True, key="merge_taf_p1")
+                st.checkbox("PART1（QMCD98_）", value=False, key="merge_taf_p1")
             with pc2:
-                st.checkbox("PART2（QMCJ98_）", value=True, key="merge_taf_p2")
+                st.checkbox("PART2（QMCJ98_）", value=False, key="merge_taf_p2")
         st.divider()
 
     sigwx_cfg = cfg.get("jma_airinfo_low_level_sigwx")
@@ -235,41 +256,61 @@ def _render_charts_zip(cfg: dict) -> None:
         and not str(sigwx_cfg.get("url") or "").strip()
     ):
         st.markdown("**下層悪天予想図**（結合 PDF・時系列 ft=39）")
-        st.caption("地域を選び、「結合 PDF を生成」に反映されます（すべてオンで従来どおり全地域）。")
+        st.caption(
+            "地域を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
+            " すべてオンで従来どおり全地域を含めます。"
+        )
         srows = _sigwx_product_rows(sigwx_cfg)
         if not srows:
             st.info("config の `jma_airinfo_low_level_sigwx.products` に `area` を追加してください。")
         else:
-            sc = st.columns(min(3, len(srows)))
-            for i, sr in enumerate(srows):
-                a = sr["area"]
-                with sc[i % len(sc)]:
-                    st.checkbox(
-                        f"{sr['label']}（{a}）",
-                        value=True,
-                        key=f"merge_sigwx_{a}",
-                    )
+            gsig = getattr(wx, "group_sigwx_rows_by_region", None)
+            sblocks = gsig(srows) if callable(gsig) else [("地域", srows)]
+            for title, slist in sblocks:
+                if not slist:
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"**{title}**")
+                    sc = st.columns(min(3, max(1, len(slist))))
+                    for i, sr in enumerate(slist):
+                        a = sr["area"]
+                        with sc[i % len(sc)]:
+                            st.checkbox(
+                                f"{sr['label']}（{a}）",
+                                value=False,
+                                key=f"merge_sigwx_{a}",
+                            )
         st.divider()
 
     dsig_cfg = cfg.get("jma_airinfo_low_level_detailed_sigwx")
     if isinstance(dsig_cfg, dict) and dsig_cfg.get("enabled"):
         st.markdown("**下層悪天予想図（詳細版）**（結合 PDF）")
-        st.caption("県を選び、「結合 PDF を生成」に反映されます（すべてオンで従来どおり全件）。")
+        st.caption(
+            "県を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
+            " すべてオンで従来どおり全件を含めます。"
+        )
         drows = _detailed_sigwx_product_rows(dsig_cfg)
         if not drows:
             st.info(
                 "config の `jma_airinfo_low_level_detailed_sigwx.products` に `fig` を追加してください。"
             )
         else:
-            dc = st.columns(4)
-            for i, dr in enumerate(drows):
-                fk = dr["fig_key"]
-                with dc[i % 4]:
-                    st.checkbox(
-                        f"{dr['label']}（{fk}）",
-                        value=True,
-                        key=f"merge_dsig_{fk}",
-                    )
+            gdet = getattr(wx, "group_detailed_sigwx_rows_by_region", None)
+            dblocks = gdet(drows) if callable(gdet) else [("地域", drows)]
+            for title, dlist in dblocks:
+                if not dlist:
+                    continue
+                with st.container(border=True):
+                    st.markdown(f"**{title}**")
+                    dc = st.columns(4)
+                    for i, dr in enumerate(dlist):
+                        fk = dr["fig_key"]
+                        with dc[i % 4]:
+                            st.checkbox(
+                                f"{dr['label']}（{fk}）",
+                                value=False,
+                                key=f"merge_dsig_{fk}",
+                            )
         st.divider()
 
     c1, c2 = st.columns(2)
@@ -279,7 +320,7 @@ def _render_charts_zip(cfg: dict) -> None:
             warns: list[str] = []
             data, pages = b"", 0
             merged_taf: dict | None = None
-            skip_merge = False
+            skip_merged_pdf = False
             taf2 = cfg.get("jma_airinfo_taf")
             if isinstance(taf2, dict) and taf2.get("enabled"):
                 prows2 = [
@@ -292,27 +333,25 @@ def _render_charts_zip(cfg: dict) -> None:
                     sel = [
                         icao
                         for icao in all_icaos
-                        if st.session_state.get(f"merge_taf_ap_{icao}", True)
+                        if st.session_state.get(f"merge_taf_ap_{icao}", False)
                     ]
-                    p1 = bool(st.session_state.get("merge_taf_p1", True))
-                    p2 = bool(st.session_state.get("merge_taf_p2", True))
-                    if not sel:
+                    p1 = bool(st.session_state.get("merge_taf_p1", False))
+                    p2 = bool(st.session_state.get("merge_taf_p2", False))
+                    if sel and not p1 and not p2:
                         st.warning(
-                            "飛行場時系列予報: 空港を1つ以上選んでください。"
+                            "飛行場時系列予報: 空港を選んだときは PART1 / PART2 の"
+                            "どちらかにチェックを入れてください。"
                         )
-                        skip_merge = True
-                    elif not p1 and not p2:
-                        st.warning(
-                            "飛行場時系列予報: PART1 と PART2 のどちらかにチェックを入れてください。"
+                        skip_merged_pdf = True
+                    else:
+                        full = (
+                            bool(sel)
+                            and set(sel) == set(all_icaos)
+                            and len(sel) == len(all_icaos)
+                            and p1
+                            and p2
                         )
-                        skip_merge = True
-                    elif not (
-                        set(sel) == set(all_icaos)
-                        and len(sel) == len(all_icaos)
-                        and p1
-                        and p2
-                    ):
-                        merged_taf = {"icaos": sel, "part1": p1, "part2": p2}
+                        merged_taf = None if full else {"icaos": sel, "part1": p1, "part2": p2}
             merged_sigwx_areas: list[str] | None = None
             use_sigwx_kw = False
             if (
@@ -324,7 +363,7 @@ def _render_charts_zip(cfg: dict) -> None:
                 if srows_m:
                     all_sa = [r["area"] for r in srows_m]
                     sel_sa = [
-                        a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", True)
+                        a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", False)
                     ]
                     if not sel_sa:
                         merged_sigwx_areas = []
@@ -341,7 +380,7 @@ def _render_charts_zip(cfg: dict) -> None:
                     sel_fk = [
                         fk
                         for fk in all_fk
-                        if st.session_state.get(f"merge_dsig_{fk}", True)
+                        if st.session_state.get(f"merge_dsig_{fk}", False)
                     ]
                     if not sel_fk:
                         merged_detailed_figs = []
@@ -349,7 +388,7 @@ def _render_charts_zip(cfg: dict) -> None:
                     elif set(sel_fk) != set(all_fk):
                         merged_detailed_figs = sel_fk
                         use_det_kw = True
-            if not skip_merge:
+            if not skip_merged_pdf:
                 pdf_kw: dict = {"merged_taf_selection": merged_taf}
                 if use_sigwx_kw:
                     pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas

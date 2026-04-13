@@ -149,6 +149,176 @@ METAR_TAF_DEFAULT_AIRPORTS: list[dict[str, str]] = [
 METAR_TAF_ICAO_ALLOW = frozenset(a["icao"] for a in METAR_TAF_DEFAULT_AIRPORTS)
 _METAR_TAF_PDF_FONT_OK = False
 
+# Streamlit / HTTP ポータル共通: METAR・TAF 等の UI 地域枠（後から九州などを追加しやすい）
+UI_REGION_GROUPS_METAR_TAF: list[dict] = [
+    {
+        "id": "tohoku_kanto",
+        "title": "東北・関東",
+        "icaos": (
+            "RJSF",
+            "RJSS",
+            "RJSN",
+            "RJSC",
+            "RJSI",
+            "RJSY",
+            "RJSK",
+            "RJTU",
+            "RJAH",
+        ),
+    },
+]
+# 飛行場時系列予報の products 用（ICAO 並びは METAR・TAF と同じ地域定義）
+UI_REGION_GROUPS_TAF_ICAO = UI_REGION_GROUPS_METAR_TAF
+# 下層悪天予想図（詳細版）の Fig を地域枠に分類（現状は東北・関東のみ）
+UI_REGION_GROUPS_DETAILED_SIGWX: list[dict] = [
+    {
+        "id": "tohoku_kanto",
+        "title": "東北・関東",
+        "figs": (
+            "Fig206",
+            "Fig204",
+            "Fig202",
+            "Fig205",
+            "Fig501",
+            "Fig203",
+            "Fig301",
+            "Fig302",
+        ),
+    },
+]
+# 下層悪天予想図（地域別・時系列）: 東北を「東北・関東」枠、西日本を別枠
+UI_REGION_GROUPS_SIGWX_AREA: list[dict] = [
+    {"id": "tohoku_kanto", "title": "東北・関東", "areas": ("fbsn",)},
+    {"id": "nishi_nihon", "title": "西日本", "areas": ("fbos",)},
+]
+
+
+def group_metar_taf_airports_by_region(
+    airports: list[dict],
+) -> list[tuple[str, list[dict]]]:
+    """UI 用: (地域タイトル, 空港行) のリスト。未定義の空港は「その他」。"""
+    seen: set[str] = set()
+    blocks: list[tuple[str, list[dict]]] = []
+    for g in UI_REGION_GROUPS_METAR_TAF:
+        title = str(g.get("title") or "").strip() or "地域"
+        want = [str(x).strip().upper() for x in (g.get("icaos") or ()) if str(x).strip()]
+        if not want:
+            continue
+        order = {c: i for i, c in enumerate(want)}
+        sub = [
+            ap
+            for ap in airports
+            if str(ap.get("icao") or "").strip().upper() in order
+        ]
+        sub.sort(
+            key=lambda ap: order.get(str(ap.get("icao") or "").strip().upper(), 99)
+        )
+        for ap in sub:
+            seen.add(str(ap.get("icao") or "").strip().upper())
+        if sub:
+            blocks.append((title, sub))
+    other = [
+        ap
+        for ap in airports
+        if str(ap.get("icao") or "").strip().upper() not in seen
+    ]
+    if other:
+        other.sort(key=lambda ap: str(ap.get("icao") or ""))
+        blocks.append(("その他", other))
+    return blocks
+
+
+def group_taf_products_by_region(
+    prows: list[dict],
+) -> list[tuple[str, list[dict]]]:
+    """飛行場時系列予報 products を地域枠ごとに並べ替え。"""
+    rows: list[dict] = []
+    for pr in prows:
+        if not isinstance(pr, dict):
+            continue
+        c = str(pr.get("icao") or "").strip().upper()
+        if c:
+            rows.append(pr)
+    seen: set[str] = set()
+    blocks: list[tuple[str, list[dict]]] = []
+    for g in UI_REGION_GROUPS_TAF_ICAO:
+        title = str(g.get("title") or "").strip() or "地域"
+        want = [str(x).strip().upper() for x in (g.get("icaos") or ()) if str(x).strip()]
+        if not want:
+            continue
+        order = {c: i for i, c in enumerate(want)}
+        sub = [pr for pr in rows if str(pr.get("icao") or "").strip().upper() in order]
+        sub.sort(
+            key=lambda pr: order.get(str(pr.get("icao") or "").strip().upper(), 99)
+        )
+        for pr in sub:
+            seen.add(str(pr.get("icao") or "").strip().upper())
+        if sub:
+            blocks.append((title, sub))
+    other = [
+        pr
+        for pr in rows
+        if str(pr.get("icao") or "").strip().upper() not in seen
+    ]
+    if other:
+        other.sort(key=lambda pr: str(pr.get("icao") or ""))
+        blocks.append(("その他", other))
+    return blocks
+
+
+def group_detailed_sigwx_rows_by_region(
+    drows: list[dict],
+) -> list[tuple[str, list[dict]]]:
+    """詳細版の行（fig_key）を地域枠に分類。"""
+    seen: set[str] = set()
+    blocks: list[tuple[str, list[dict]]] = []
+    for g in UI_REGION_GROUPS_DETAILED_SIGWX:
+        title = str(g.get("title") or "").strip() or "地域"
+        want = [str(x).strip() for x in (g.get("figs") or ()) if str(x).strip()]
+        if not want:
+            continue
+        order = {c: i for i, c in enumerate(want)}
+        sub = [d for d in drows if str(d.get("fig_key") or "").strip() in order]
+        sub.sort(
+            key=lambda d: order.get(str(d.get("fig_key") or "").strip(), 99)
+        )
+        for d in sub:
+            seen.add(str(d.get("fig_key") or "").strip())
+        if sub:
+            blocks.append((title, sub))
+    other = [d for d in drows if str(d.get("fig_key") or "").strip() not in seen]
+    if other:
+        other.sort(key=lambda d: str(d.get("fig_key") or ""))
+        blocks.append(("その他", other))
+    return blocks
+
+
+def group_sigwx_rows_by_region(srows: list[dict]) -> list[tuple[str, list[dict]]]:
+    """下層悪天予想図（地域別）の行を UI 枠ごとに分類。"""
+    seen: set[str] = set()
+    blocks: list[tuple[str, list[dict]]] = []
+    for g in UI_REGION_GROUPS_SIGWX_AREA:
+        title = str(g.get("title") or "").strip() or "地域"
+        want = [
+            re.sub(r"[^a-z0-9]", "", str(x).lower())
+            for x in (g.get("areas") or ())
+            if str(x).strip()
+        ]
+        if not want:
+            continue
+        order = {a: i for i, a in enumerate(want)}
+        sub = [s for s in srows if str(s.get("area") or "") in order]
+        sub.sort(key=lambda s: order.get(str(s.get("area") or ""), 99))
+        for s in sub:
+            seen.add(str(s.get("area") or ""))
+        if sub:
+            blocks.append((title, sub))
+    other = [s for s in srows if str(s.get("area") or "") not in seen]
+    if other:
+        other.sort(key=lambda s: str(s.get("area") or ""))
+        blocks.append(("その他", other))
+    return blocks
+
 
 def _metar_taf_pdf_font_name() -> str:
     """日本語を含む PDF 用（reportlab 同梱の CID フォント）。"""
@@ -3327,18 +3497,30 @@ def html_metar_taf_panel(cfg: dict) -> str:
     block = cfg.get("metar_taf_fetch")
     if not isinstance(block, dict) or not block.get("enabled") or not airports:
         return ""
-    rows_html: list[str] = []
-    for ap in airports:
-        icao = ap["icao"]
-        lab = html.escape(ap["label"])
-        cid = html.escape(re.sub(r"[^A-Za-z0-9_]", "_", icao))
-        ic_e = html.escape(icao)
-        rows_html.append(
-            f'<label class="metar-taf-label" for="mt_{cid}">'
-            f'<input type="checkbox" name="icao" value="{ic_e}" id="mt_{cid}" class="metar-taf-ap"> '
-            f'<span class="metar-taf-name">{lab}</span>'
-            f' <span class="metar-taf-icao">({ic_e})</span></label>'
+    rows_html_parts: list[str] = []
+    for title, aps in group_metar_taf_airports_by_region(airports):
+        title_e = html.escape(title)
+        inner: list[str] = []
+        for ap in aps:
+            icao = ap["icao"]
+            lab = html.escape(ap["label"])
+            cid = html.escape(re.sub(r"[^A-Za-z0-9_]", "_", icao))
+            ic_e = html.escape(icao)
+            inner.append(
+                f'<label class="metar-taf-label" for="mt_{cid}">'
+                f'<input type="checkbox" name="icao" value="{ic_e}" id="mt_{cid}" class="metar-taf-ap"> '
+                f'<span class="metar-taf-name">{lab}</span>'
+                f' <span class="metar-taf-icao">({ic_e})</span></label>'
+            )
+        if not inner:
+            continue
+        inner_joined = "\n".join(inner)
+        rows_html_parts.append(
+            f'<fieldset class="metar-taf-region"><legend>{title_e}</legend>'
+            f'<div class="metar-taf-checks metar-taf-checks-region">'
+            f"{inner_joined}</div></fieldset>"
         )
+    rows_html = "\n".join(rows_html_parts)
     src = metar_taf_source(cfg)
     raw_note = block.get("note")
     if raw_note:
@@ -3355,7 +3537,7 @@ def html_metar_taf_panel(cfg: dict) -> str:
             "官報・運航判断は必ず公式情報で確認してください。"
         )
     note_e = html.escape(str(note))
-    checks = "\n".join(rows_html)
+    checks = rows_html
     script = """
 <script>
 (function () {
@@ -3410,7 +3592,7 @@ def html_metar_taf_panel(cfg: dict) -> str:
         <p class="metar-taf-lead">① 空港にチェック　② <strong>METAR</strong> / <strong>TAF</strong> を選ぶ　③「PDFをダウンロード」で別タブに PDF が開きます。</p>
         <form id="metar-taf-form" class="metar-taf-form" method="post" action="/metar_taf_pdf" target="_blank" rel="noopener noreferrer">
           <p class="metar-taf-subtitle">対象空港</p>
-          <div class="metar-taf-checks">
+          <div class="metar-taf-regions-wrap">
 {checks}
           </div>
           <div id="metar-taf-kind-row" class="metar-taf-kind-row" aria-live="polite">
@@ -3640,7 +3822,16 @@ def page_html(cfg: dict) -> str:
     .metar-taf-lead {{ font-size: 0.82rem; color: var(--muted); margin: 0 0 0.5rem; line-height: 1.45; }}
     .metar-taf-subtitle {{ font-size: 0.88rem; font-weight: 600; margin: 0.85rem 0 0.35rem; color: var(--text); }}
     .metar-taf-kind-row {{ margin: 0.35rem 0 0.5rem; display: flex; flex-direction: column; align-items: flex-start; gap: 0.35rem; }}
+    .metar-taf-regions-wrap {{ display: flex; flex-direction: column; gap: 0.65rem; margin: 0.35rem 0 0.75rem; }}
+    .metar-taf-region {{
+      border: 1px solid var(--border); border-radius: 10px; padding: 0.5rem 0.65rem 0.65rem;
+      background: #fafbfc;
+    }}
+    .metar-taf-region > legend {{
+      padding: 0 0.35rem; font-size: 0.82rem; font-weight: 600; color: var(--text);
+    }}
     .metar-taf-checks {{ display: flex; flex-direction: column; align-items: flex-start; gap: 0.45rem; margin: 0.35rem 0 0.75rem; }}
+    .metar-taf-checks-region {{ margin: 0.25rem 0 0; gap: 0.4rem; }}
     .metar-taf-label {{ font-size: 0.92rem; cursor: pointer; display: flex; align-items: center; gap: 0.4rem; }}
     .metar-taf-icao {{ color: var(--muted); font-size: 0.86em; font-weight: 500; }}
     .metar-taf-actions {{ margin-top: 0.25rem; }}
