@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-70-packages-trixie-t64"
+PORTAL_BUILD = "20260413-71-himawari-screenshot-map-only-2x"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -152,6 +152,32 @@ _jma_list_cache: tuple[float, dict] | None = None
 JMA_LIST_CACHE_SEC = 60.0
 _himawari_jp_times_cache: tuple[float, list] | None = None
 HIMI_JP_TIMES_CACHE_SEC = 25.0
+# 統合地図スクショ: 広告・ヘッダの外に出しがちな地図本体（Leaflet）を優先して切り出す
+_HIMI_MAP_SCREENSHOT_DEFAULT_SELECTORS: tuple[str, ...] = (
+    "#contents-inner .leaflet-container",
+    ".leaflet-container",
+    "#mapContents .leaflet-container",
+    "#map .leaflet-container",
+    "div#map",
+    "#map",
+)
+_HIMI_MAP_SCREENSHOT_HIDE_ADS_JS = """
+(() => {
+  const sels = [
+    'iframe[src*="googlesyndication"]','iframe[src*="doubleclick.net"]',
+    'iframe[id^="google_ads"]','iframe[name^="google_ads"]','ins.adsbygoogle',
+    'div[id^="div-gpt-ad"]','iframe[title*="広告"]','iframe[title*="Advertisement"]'
+  ];
+  for (const s of sels) {
+    try {
+      document.querySelectorAll(s).forEach((el) => {
+        el.style.setProperty("display", "none", "important");
+        el.style.setProperty("visibility", "hidden", "important");
+      });
+    } catch (_e) {}
+  }
+})();
+"""
 _playwright_chromium_lock = threading.Lock()
 _playwright_chromium_ready = False
 
@@ -968,6 +994,45 @@ def _himawari_map_screenshot_page_url(band: str, msc: dict, row: dict) -> str:
     return ""
 
 
+def _himawari_map_screenshot_element_png(
+    page,
+    *,
+    clip_selector: str,
+    fallback_selectors: list[str],
+    goto_timeout: int,
+) -> bytes:
+    """
+    地図パネル（Leaflet 等）だけを撮影。セレクタが無いときはビューポート全体。
+    """
+    to = min(120_000, max(5000, int(goto_timeout)))
+
+    def _try_locator(locator) -> bytes | None:
+        try:
+            locator.wait_for(state="visible", timeout=min(12_000, to))
+        except Exception:
+            return None
+        try:
+            box = locator.bounding_box()
+        except Exception:
+            return None
+        if not box or box["width"] < 180 or box["height"] < 180:
+            return None
+        try:
+            return locator.screenshot(type="png")
+        except Exception:
+            return None
+
+    if clip_selector:
+        blob = _try_locator(page.locator(clip_selector).first)
+        if blob:
+            return blob
+    for sel in fallback_selectors:
+        blob = _try_locator(page.locator(sel).first)
+        if blob:
+            return blob
+    return page.screenshot(type="png", full_page=False)
+
+
 def _ensure_playwright_chromium_runtime() -> None:
     """
     ``pip install playwright`` だけではブラウザバイナリが無い環境（Streamlit Community Cloud 等）向けに、
@@ -1032,10 +1097,12 @@ def _ensure_playwright_chromium_runtime() -> None:
 
 def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
     """
-    防災統合地図（map.html）を headless Chromium で開き、ビューポートのスクショを JPEG にする。
+    防災統合地図（map.html）を headless Chromium で開き、**地図パネル（Leaflet）中心**の JPEG を返す。
+
+    既定では広告 iframe を非表示にし、``.leaflet-container`` 系セレクタで地図 DOM だけを切り出す。
+    ``device_scale_factor``（既定 2）でピクセル密度を上げ、地図部分の解像感を高める。
 
     初回は Chromium バイナリの自動ダウンロードを試みる（Streamlit Cloud 向け）。
-    手元では従来どおり ``playwright install chromium`` でも可。
     """
     page_url = str(opts.get("page_url") or "").strip()
     if not page_url.startswith("https://www.jma.go.jp/bosai/map.html"):
@@ -1051,6 +1118,14 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
     goto_timeout = int(opts.get("goto_timeout_ms", 120_000))
     goto_timeout = max(30_000, min(300_000, goto_timeout))
     clip_selector = str(opts.get("clip_selector") or "").strip()
+    raw_sel = opts.get("map_clip_selectors")
+    if isinstance(raw_sel, list) and raw_sel:
+        fallback_selectors = [str(x).strip() for x in raw_sel if str(x).strip()]
+    else:
+        fallback_selectors = list(_HIMI_MAP_SCREENSHOT_DEFAULT_SELECTORS)
+    dsf = float(opts.get("device_scale_factor", 2))
+    dsf = max(1.0, min(3.0, dsf))
+    hide_ads = bool(opts.get("hide_ad_overlays", True))
 
     try:
         from playwright.sync_api import sync_playwright
@@ -1071,6 +1146,7 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
                 viewport={"width": vw, "height": vh},
                 user_agent=USER_AGENT,
                 locale="ja-JP",
+                device_scale_factor=dsf,
             )
             page = context.new_page()
             page.goto(
@@ -1079,12 +1155,18 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
                 timeout=goto_timeout,
             )
             page.wait_for_timeout(wait_ms)
-            if clip_selector:
-                loc = page.locator(clip_selector).first
-                loc.wait_for(state="visible", timeout=min(120_000, goto_timeout))
-                png = loc.screenshot(type="png")
-            else:
-                png = page.screenshot(type="png", full_page=False)
+            if hide_ads:
+                try:
+                    page.evaluate(_HIMI_MAP_SCREENSHOT_HIDE_ADS_JS)
+                except Exception:
+                    pass
+                page.wait_for_timeout(600)
+            png = _himawari_map_screenshot_element_png(
+                page,
+                clip_selector=clip_selector,
+                fallback_selectors=fallback_selectors,
+                goto_timeout=goto_timeout,
+            )
             context.close()
         finally:
             browser.close()
@@ -1720,14 +1802,21 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                             "url_visible / url_infrared、または products[].map_screenshot_url を設定してください。"
                         )
                     _bt, _vt, slot_utc = _himawari_jp_select_slot(ref_utc)
+                    mcs = snap.get("map_clip_selectors")
                     him_snap = {
                         "page_url": page_url,
                         "wait_ms": int(snap.get("wait_ms", 12000)),
-                        "viewport_width": int(snap.get("viewport_width", 1440)),
-                        "viewport_height": int(snap.get("viewport_height", 900)),
+                        "viewport_width": int(snap.get("viewport_width", 1680)),
+                        "viewport_height": int(snap.get("viewport_height", 980)),
                         "goto_timeout_ms": int(snap.get("goto_timeout_ms", 120000)),
                         "clip_selector": str(snap.get("clip_selector") or "").strip(),
+                        "device_scale_factor": float(snap.get("device_scale_factor", 2)),
+                        "hide_ad_overlays": bool(snap.get("hide_ad_overlays", True)),
                     }
+                    if isinstance(mcs, list) and mcs:
+                        him_snap["map_clip_selectors"] = [
+                            str(x).strip() for x in mcs if str(x).strip()
+                        ]
                     him_mosaic = None
                     jpg_url = WXBRIEFING_HIMI_JP_MAP_SCREENSHOT
                 else:
@@ -1850,8 +1939,8 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 him_comment = (
                     "気象庁防災「統合地図」"
                     "[map.html](https://www.jma.go.jp/bosai/map.html) を **Playwright（Chromium）** で開き、"
-                    "指定 URL のビューポートを撮影した JPEG。"
-                    "地図・衛星レイヤの描画待ちは `bosai_himawari_map_screenshot.wait_ms`（既定 12 秒）。"
+                    "広告 iframe を抑えつつ **Leaflet 地図コンテナ**（`map_clip_selectors`）だけを切り出した JPEG。"
+                    "`device_scale_factor` で解像度を上げられる。地図の描画待ちは `wait_ms`。"
                     "初回は Chromium バイナリを自動ダウンロードする（`packages.txt` の OS ライブラリが必要）。"
                     "手元では `playwright install chromium` でも可。`WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1` で自動 DL を止められる。"
                     "上端の時刻帯の注記は targetTimes に基づくスロットで、**撮影画像の凡例時刻と一致しない場合があります**。"

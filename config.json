@@ -94,9 +94,15 @@
     "bosai_himawari_map_screenshot": {
       "enabled": true,
       "wait_ms": 14000,
-      "viewport_width": 1440,
-      "viewport_height": 900,
+      "viewport_width": 1680,
+      "viewport_height": 980,
       "goto_timeout_ms": 120000,
+      "device_scale_factor": 2,
+      "hide_ad_overlays": true,
+      "map_clip_selectors": [
+        "#contents-inner .leaflet-container",
+        ".leaflet-container"
+      ],
       "url_visible": "https://www.jma.go.jp/bosai/map.html#5/38.048/144.756/&elem=color&contents=himawari",
       "url_infrared": "https://www.jma.go.jp/bosai/map.html#5/36.686/143.921/&elem=ir&contents=himawari"
     },
