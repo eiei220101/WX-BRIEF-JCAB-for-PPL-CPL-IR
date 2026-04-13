@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-61-streamlit-cloud-sync"
+PORTAL_BUILD = "20260413-62-himawari-mosaic-rect-crop"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -651,6 +651,42 @@ def _himawari_trim_uniform_border(
     return im.crop((l, t, r + 1, b + 1))
 
 
+def _himawari_crop_canvas_to_filled_tiles(
+    canvas,
+    xs: list[int],
+    ys: list[int],
+    tile_map: dict[tuple[int, int], bytes | None],
+    tw: int,
+    th: int,
+):
+    """
+    取得に成功したタイルが占める格子の最小外接矩形に切り出す（欠損のみの行・列を落とし、外周をまっすぐにする）。
+    Pillow の crop は (left, upper, right, lower) で right/lower は排他的。
+    """
+    nx = len(xs)
+    ny = len(ys)
+    min_i, max_i = nx, -1
+    min_j, max_j = ny, -1
+    for j in range(ny):
+        ty = ys[j]
+        for i in range(nx):
+            tx = xs[i]
+            if tile_map.get((tx, ty)):
+                min_i = min(min_i, i)
+                max_i = max(max_i, i)
+                min_j = min(min_j, j)
+                max_j = max(max_j, j)
+    if max_i < min_i or max_j < min_j:
+        return canvas
+    left = min_i * tw
+    upper = min_j * th
+    right = (max_i + 1) * tw
+    lower = (max_j + 1) * th
+    if right <= left or lower <= upper:
+        return canvas
+    return canvas.crop((left, upper, right, lower))
+
+
 def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
     緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
@@ -729,6 +765,14 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
             )
             if blob:
                 tile_map[xy] = blob
+    failed2 = [xy for xy in coords if not tile_map.get(xy)]
+    for xy in failed2:
+        time.sleep(0.12)
+        blob = _himawari_jp_fetch_tile_jpeg(
+            bt, vt, prod_band, prod_name, z, xy[0], xy[1]
+        )
+        if blob:
+            tile_map[xy] = blob
 
     first: bytes | None = None
     for xy in coords:
@@ -762,6 +806,10 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
             except Exception:
                 continue
 
+    if bool(opts.get("crop_mosaic_to_filled_tiles", True)):
+        canvas = _himawari_crop_canvas_to_filled_tiles(
+            canvas, xs, ys, tile_map, tw, th
+        )
     if bool(opts.get("trim_mosaic_border", True)):
         canvas = _himawari_trim_uniform_border(canvas)
 
@@ -1415,6 +1463,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                         "trim_mosaic_border": bool(
                             msc.get("trim_mosaic_border", True)
                         ),
+                        "crop_mosaic_to_filled_tiles": bool(
+                            msc.get("crop_mosaic_to_filled_tiles", True)
+                        ),
                     }
                     q = urllib.parse.urlencode({"band": str(band), "bt": bt})
                     jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
@@ -1467,6 +1518,7 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
                     "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
                     "モザイクは bosai_himawari_bbox（既定: 樺太南端〜台湾・日本域）を Web Mercator タイルで結合。"
+                    "取得できたタイルの外周だけを長方形に切り出し（crop_mosaic_to_filled_tiles）、余白は trim_mosaic_border で削る。"
                     "satimg は z=6 まで（それ以上は 404）。単タイルのみは bosai_himawari_single_tile: true。"
                     "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
                     f"観測 **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
