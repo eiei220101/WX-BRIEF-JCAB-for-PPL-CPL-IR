@@ -95,9 +95,9 @@
     "bosai_fetch_zoom": 6,
     "bosai_himawari_mosaic_max_tiles": 400,
     "bosai_himawari_bbox": {
-      "lon_w": 121.0,
+      "lon_w": 104.0,
       "lon_e": 155.0,
-      "lat_s": 16.65,
+      "lat_s": 21.0,
       "lat_n": 55.35
     },
     "bosai_map_lat": 36.0,

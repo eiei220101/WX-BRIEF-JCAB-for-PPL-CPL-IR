@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-63-himawari-bbox-sakhalin-laos-jp-center"
+PORTAL_BUILD = "20260413-64-himawari-bbox-china-tw-south100km"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -691,7 +691,7 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
     緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
 
-    描画範囲は lon_w〜lon_e / lat_s〜lat_n（既定は樺太北端＋約80km〜ラオス付近・経度は日本を中心）。
+    描画範囲は lon_w〜lon_e / lat_s〜lat_n（既定: 西は大陸側まで104°E付近、東155°E、北は樺太北端＋約80km、南は台湾南端から約100km南≈21°N）。
     """
     from PIL import Image
 
@@ -707,9 +707,9 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         pb, pn, _ = _himawari_jp_band_products(band)
         prod_band, prod_name = pb, pn
 
-    lon_w = float(opts.get("lon_w", 121.0))
+    lon_w = float(opts.get("lon_w", 104.0))
     lon_e = float(opts.get("lon_e", 155.0))
-    lat_s = float(opts.get("lat_s", 16.65))
+    lat_s = float(opts.get("lat_s", 21.0))
     lat_n = float(opts.get("lat_n", 55.35))
     if lon_e <= lon_w or lat_n <= lat_s:
         raise ValueError("ひまわりモザイク: 緯度経度の範囲が不正です")
@@ -1424,14 +1424,14 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 max_tiles = max(16, min(900, max_tiles))
                 bbox = msc.get("bosai_himawari_bbox")
                 if isinstance(bbox, dict):
-                    lon_w = float(bbox.get("lon_w", 121.0))
+                    lon_w = float(bbox.get("lon_w", 104.0))
                     lon_e = float(bbox.get("lon_e", 155.0))
-                    lat_s = float(bbox.get("lat_s", 16.65))
+                    lat_s = float(bbox.get("lat_s", 21.0))
                     lat_n = float(bbox.get("lat_n", 55.35))
                 else:
-                    lon_w = float(msc.get("bosai_him_lon_w", 121.0))
+                    lon_w = float(msc.get("bosai_him_lon_w", 104.0))
                     lon_e = float(msc.get("bosai_him_lon_e", 155.0))
-                    lat_s = float(msc.get("bosai_him_lat_s", 16.65))
+                    lat_s = float(msc.get("bosai_him_lat_s", 21.0))
                     lat_n = float(msc.get("bosai_him_lat_n", 55.35))
 
                 if msc.get("bosai_himawari_single_tile"):
@@ -1466,7 +1466,17 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                             msc.get("crop_mosaic_to_filled_tiles", True)
                         ),
                     }
-                    q = urllib.parse.urlencode({"band": str(band), "bt": bt})
+                    q = urllib.parse.urlencode(
+                        {
+                            "band": str(band),
+                            "bt": bt,
+                            "lw": f"{lon_w:.3f}",
+                            "le": f"{lon_e:.3f}",
+                            "ls": f"{lat_s:.3f}",
+                            "ln": f"{lat_n:.3f}",
+                            "zf": str(z_fetch),
+                        }
+                    )
                     jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
@@ -1516,7 +1526,7 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
                     "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=color&contents=himawari 、"
                     "赤外は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=ir&contents=himawari と同系のデータ。"
-                    "モザイクは bosai_himawari_bbox（既定: 樺太北端＋約80km〜ラオス付近・日本付近を緯度中央）を Web Mercator タイルで結合。"
+                    "モザイクは bosai_himawari_bbox（既定: 104°E〜155°E・台湾南端−約100km〜樺太北端＋約80km）を Web Mercator タイルで結合。"
                     "取得できたタイルの外周だけを長方形に切り出し（crop_mosaic_to_filled_tiles）、余白は trim_mosaic_border で削る。"
                     "satimg は z=6 まで（それ以上は 404）。単タイルのみは bosai_himawari_single_tile: true。"
                     "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
