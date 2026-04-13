@@ -104,8 +104,8 @@
         "#contents-inner .leaflet-container",
         ".leaflet-container"
       ],
-      "url_visible": "https://www.jma.go.jp/bosai/map.html#5/38.048/144.756/&elem=color&contents=himawari",
-      "url_infrared": "https://www.jma.go.jp/bosai/map.html#5/36.686/143.921/&elem=ir&contents=himawari"
+      "url_visible": "https://www.jma.go.jp/bosai/map.html#5/37.213/137.197/&elem=color&contents=himawari&interval=middle",
+      "url_infrared": "https://www.jma.go.jp/bosai/map.html#5/35.657/143.13/&elem=ir&contents=himawari&interval=middle"
     },
     "bosai_map_zoom": 5,
     "bosai_fetch_zoom": 5,
