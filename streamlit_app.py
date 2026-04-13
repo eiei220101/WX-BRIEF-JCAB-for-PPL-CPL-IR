@@ -115,6 +115,11 @@ def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
         if not fk:
             continue
         lab = str(p.get("label") or p.get("name") or "").strip() or fk
+        off = getattr(wx, "detailed_sigwx_official_ja_label", None)
+        if callable(off):
+            o = off(fk)
+            if o:
+                lab = o
         out.append({"fig_key": fk, "label": lab})
     return out
 

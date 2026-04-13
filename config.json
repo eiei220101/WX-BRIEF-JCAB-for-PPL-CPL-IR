@@ -82,10 +82,10 @@
     "products": [
       { "fig": "Fig206", "filename": "下層悪天予想図_詳細_福島県.png", "label": "福島県" },
       { "fig": "Fig204", "filename": "下層悪天予想図_詳細_宮城県.png", "label": "宮城県" },
-      { "fig": "Fig202", "filename": "下層悪天予想図_詳細_岩手県.png", "label": "岩手県" },
-      { "fig": "Fig205", "filename": "下層悪天予想図_詳細_秋田県.png", "label": "秋田県" },
+      { "fig": "Fig202", "filename": "下層悪天予想図_詳細_秋田県.png", "label": "秋田県" },
+      { "fig": "Fig205", "filename": "下層悪天予想図_詳細_山形県.png", "label": "山形県" },
       { "fig": "Fig501", "filename": "下層悪天予想図_詳細_新潟県.png", "label": "新潟県" },
-      { "fig": "Fig203", "filename": "下層悪天予想図_詳細_山形県.png", "label": "山形県" },
+      { "fig": "Fig203", "filename": "下層悪天予想図_詳細_岩手県.png", "label": "岩手県" },
       { "fig": "Fig301", "filename": "下層悪天予想図_詳細_茨城県.png", "label": "茨城県" },
       { "fig": "Fig302", "filename": "下層悪天予想図_詳細_栃木県.png", "label": "栃木県" }
     ]

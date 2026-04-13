@@ -182,7 +182,9 @@ UI_REGION_GROUPS_METAR_TAF: list[dict] = [
 ]
 # 飛行場時系列予報の products 用（ICAO 並びは METAR・TAF と同じ地域定義）
 UI_REGION_GROUPS_TAF_ICAO = UI_REGION_GROUPS_METAR_TAF
-# 下層悪天予想図（詳細版）の Fig を地域枠に分類（現状は東北・関東のみ）
+# 下層悪天予想図（詳細版）の Fig を地域枠に分類（現状は東北・関東のみ）。
+# Fig### と画像は気象庁 awfo_low-level_detailed-sigwx.html の areano と同一
+# （JMA_DETAILED_SIGWX_FIG_LABELS_JA を参照）。
 UI_REGION_GROUPS_DETAILED_SIGWX: list[dict] = [
     {
         "id": "tohoku_kanto",
@@ -711,6 +713,30 @@ def detailed_sigwx_fig_canonical(fig: str) -> str | None:
     if not m:
         return None
     return f"Fig{m.group(1)}"
+
+
+# 下層悪天予想図（詳細版）: awfo_low-level_detailed-sigwx.html の value="Fig###" と
+# ドロップダウン表示の対応（気象庁サイト実測）。UI・PDF 説明のラベル整合用。
+# 未定義の Fig は config の label をそのまま使う。
+JMA_DETAILED_SIGWX_FIG_LABELS_JA: dict[str, str] = {
+    "Fig201": "青森県",
+    "Fig202": "秋田県",
+    "Fig203": "岩手県",
+    "Fig204": "宮城県",
+    "Fig205": "山形県",
+    "Fig206": "福島県",
+    "Fig301": "茨城県",
+    "Fig302": "栃木県",
+    "Fig501": "新潟県",
+}
+
+
+def detailed_sigwx_official_ja_label(fig: str) -> str | None:
+    """Fig 番号に対応する公式サイト相当の日本語ラベル。辞書に無ければ None。"""
+    fk = detailed_sigwx_fig_canonical(str(fig))
+    if not fk:
+        return None
+    return JMA_DETAILED_SIGWX_FIG_LABELS_JA.get(fk)
 
 
 def jma_airinfo_fxjp106_cross_section_png_url(utc_initial: str) -> str:
@@ -2680,6 +2706,17 @@ def expand_download_items(
                     continue
                 if detailed_fig_allow is not None and fig_key not in detailed_fig_allow:
                     continue
+                official_lab = detailed_sigwx_official_ja_label(fig_key)
+                if official_lab:
+                    if label and label != official_lab:
+                        warnings.append(
+                            "jma_airinfo_low_level_detailed_sigwx: "
+                            f"{fig_key} の label が公式と異なります "
+                            f"(config={label!r} → 表示・説明は {official_lab!r} に合わせます)"
+                        )
+                    label = official_lab
+                elif not label:
+                    label = fig_key
                 pref = str(pr.get("image_prefix") or "").strip() or pref_default
                 pref_arg = pref if pref else None
                 if url_override:
