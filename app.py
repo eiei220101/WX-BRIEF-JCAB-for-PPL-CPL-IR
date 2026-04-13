@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-67-himawari-margin-nearblack-letterbox"
+PORTAL_BUILD = "20260413-68-himawari-playwright-map-screenshot"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -144,6 +144,7 @@ JMA_NOWC_TARGET_N1 = f"{JMA_NOWC_TILE_ROOT}/targetTimes_N1.json"
 JMA_GSI_PALE_TILE = "https://www.jma.go.jp/tile/gsi/pale"
 WXBRIEFING_HRPNS_MOSAIC = "wxbriefing://jma-nowc-hrpns-mosaic"
 WXBRIEFING_HIMI_JP_MOSAIC = "wxbriefing://jma-himi-jp-mosaic"
+WXBRIEFING_HIMI_JP_MAP_SCREENSHOT = "wxbriefing://jma-himi-map-screenshot"
 WXBRIEFING_AIRINFO_TAF_MERGED = "wxbriefing://jma-airinfo-taf-merged"
 JST = ZoneInfo("Asia/Tokyo")
 UTC = ZoneInfo("UTC")
@@ -949,6 +950,84 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     return buf.getvalue()
 
 
+def _himawari_map_screenshot_page_url(band: str, msc: dict, row: dict) -> str:
+    """bosai_himawari_map_screenshot または products[].map_screenshot_url から取得 URL を決める。"""
+    u = str(row.get("map_screenshot_url") or "").strip()
+    if u:
+        return u
+    snap = msc.get("bosai_himawari_map_screenshot")
+    if not isinstance(snap, dict):
+        return ""
+    bnorm = re.sub(r"[^a-z0-9]", "", str(band).lower())
+    if bnorm in ("tre", "color", "rep", "truecolor", "vis", "rgb", "etc"):
+        return str(snap.get("url_visible") or snap.get("url_color") or "").strip()
+    if bnorm in ("b13", "ir", "infrared", "tbb"):
+        return str(snap.get("url_infrared") or snap.get("url_ir") or "").strip()
+    return ""
+
+
+def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
+    """
+    防災統合地図（map.html）を headless Chromium で開き、ビューポートのスクショを JPEG にする。
+
+    事前: ``pip install playwright`` と ``playwright install chromium``（Streamlit Cloud では未対応のことが多い）。
+    """
+    page_url = str(opts.get("page_url") or "").strip()
+    if not page_url.startswith("https://www.jma.go.jp/bosai/map.html"):
+        raise ValueError(
+            "統合地図スクショ: page_url は https://www.jma.go.jp/bosai/map.html で始まる必要があります"
+        )
+    wait_ms = int(opts.get("wait_ms", 12000))
+    wait_ms = max(2000, min(180_000, wait_ms))
+    vw = int(opts.get("viewport_width", 1440))
+    vh = int(opts.get("viewport_height", 900))
+    vw = max(640, min(2560, vw))
+    vh = max(480, min(1600, vh))
+    goto_timeout = int(opts.get("goto_timeout_ms", 120_000))
+    goto_timeout = max(30_000, min(300_000, goto_timeout))
+    clip_selector = str(opts.get("clip_selector") or "").strip()
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:
+        raise ValueError(
+            "統合地図スクショには Playwright が必要です: "
+            "pip install playwright および playwright install chromium を実行してください。"
+        ) from e
+
+    from PIL import Image
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            context = browser.new_context(
+                viewport={"width": vw, "height": vh},
+                user_agent=USER_AGENT,
+                locale="ja-JP",
+            )
+            page = context.new_page()
+            page.goto(
+                page_url,
+                wait_until="domcontentloaded",
+                timeout=goto_timeout,
+            )
+            page.wait_for_timeout(wait_ms)
+            if clip_selector:
+                loc = page.locator(clip_selector).first
+                loc.wait_for(state="visible", timeout=min(120_000, goto_timeout))
+                png = loc.screenshot(type="png")
+            else:
+                png = page.screenshot(type="png", full_page=False)
+            context.close()
+        finally:
+            browser.close()
+
+    im = Image.open(io.BytesIO(png)).convert("RGB")
+    buf = io.BytesIO()
+    im.save(buf, format="JPEG", quality=93, subsampling=0, optimize=True)
+    return buf.getvalue()
+
+
 def msc_himawari_japan_jpg_url_for_ref_utc(
     band: str,
     ref_utc: datetime | None = None,
@@ -1370,6 +1449,16 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
             build_himawari_jp_mosaic_jpeg_bytes(item.get("himawari_mosaic") or {}),
             "image/jpeg",
         )
+    elif isinstance(url, str) and url.startswith(WXBRIEFING_HIMI_JP_MAP_SCREENSHOT):
+        snap = item.get("himawari_map_screenshot")
+        if not isinstance(snap, dict) or not str(snap.get("page_url") or "").strip():
+            raise ValueError(
+                "統合地図スクショ: item に himawari_map_screenshot.page_url がありません"
+            )
+        data, ctype = (
+            build_himawari_bosai_map_screenshot_jpeg_bytes(snap),
+            "image/jpeg",
+        )
     else:
         data, ctype = fetch_url(str(url), timeout=timeout)
 
@@ -1550,90 +1639,115 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 warnings.append("jma_msc_himawari_japan: band なしの行をスキップしました")
                 continue
             him_mosaic: dict | None = None
+            him_snap: dict | None = None
             try:
                 ref_utc = datetime.now(UTC)
-                max_tiles = int(msc.get("bosai_himawari_mosaic_max_tiles", 400))
-                max_tiles = max(16, min(900, max_tiles))
-                bbox = msc.get("bosai_himawari_bbox")
-                like = msc.get("bosai_himawari_like_map")
-                if isinstance(like, dict) and like.get("enabled", False):
-                    z_lm = int(like.get("z", 5))
-                    lat_lm = float(like.get("lat", 37.545))
-                    lon_lm = float(like.get("lon", 145.415))
-                    vp_w = float(like.get("vp_w", 1280))
-                    vp_h = float(like.get("vp_h", 820))
-                    lon_w, lon_e, lat_s, lat_n = _himawari_bbox_from_map_viewport(
-                        z_lm, lat_lm, lon_lm, vp_w, vp_h
-                    )
-                elif isinstance(bbox, dict):
-                    lon_w = float(bbox.get("lon_w", 117.29))
-                    lon_e = float(bbox.get("lon_e", 173.54))
-                    lat_s = float(bbox.get("lat_s", 21.98))
-                    lat_n = float(bbox.get("lat_n", 50.43))
-                else:
-                    lon_w = float(msc.get("bosai_him_lon_w", 117.29))
-                    lon_e = float(msc.get("bosai_him_lon_e", 173.54))
-                    lat_s = float(msc.get("bosai_him_lat_s", 21.98))
-                    lat_n = float(msc.get("bosai_him_lat_n", 50.43))
+                snap = msc.get("bosai_himawari_map_screenshot")
+                use_snap = isinstance(snap, dict) and bool(snap.get("enabled"))
 
-                if msc.get("bosai_himawari_single_tile"):
-                    jpg_url, _hhmm, _slot_iso, slot_utc = (
-                        msc_himawari_japan_jpg_url_for_ref_utc(
-                            str(band), ref_utc, msc
+                if use_snap:
+                    page_url = _himawari_map_screenshot_page_url(str(band), msc, row)
+                    if not page_url:
+                        raise ValueError(
+                            "bosai_himawari_map_screenshot.enabled のときは "
+                            "url_visible / url_infrared、または products[].map_screenshot_url を設定してください。"
                         )
-                    )
+                    _bt, _vt, slot_utc = _himawari_jp_select_slot(ref_utc)
+                    him_snap = {
+                        "page_url": page_url,
+                        "wait_ms": int(snap.get("wait_ms", 12000)),
+                        "viewport_width": int(snap.get("viewport_width", 1440)),
+                        "viewport_height": int(snap.get("viewport_height", 900)),
+                        "goto_timeout_ms": int(snap.get("goto_timeout_ms", 120000)),
+                        "clip_selector": str(snap.get("clip_selector") or "").strip(),
+                    }
+                    him_mosaic = None
+                    jpg_url = WXBRIEFING_HIMI_JP_MAP_SCREENSHOT
                 else:
-                    bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
-                    prod_band, prod_name, _ = _himawari_jp_band_products(str(band))
+                    max_tiles = int(msc.get("bosai_himawari_mosaic_max_tiles", 400))
+                    max_tiles = max(16, min(900, max_tiles))
+                    bbox = msc.get("bosai_himawari_bbox")
+                    like = msc.get("bosai_himawari_like_map")
                     if isinstance(like, dict) and like.get("enabled", False):
                         z_lm = int(like.get("z", 5))
-                        z_fetch = int(like.get("fetch_zoom", z_lm))
-                    else:
-                        z_fetch = int(
-                            msc.get("bosai_fetch_zoom", HIMI_JP_TILE_MAX_ZOOM)
+                        lat_lm = float(like.get("lat", 37.545))
+                        lon_lm = float(like.get("lon", 145.415))
+                        vp_w = float(like.get("vp_w", 1280))
+                        vp_h = float(like.get("vp_h", 820))
+                        lon_w, lon_e, lat_s, lat_n = _himawari_bbox_from_map_viewport(
+                            z_lm, lat_lm, lon_lm, vp_w, vp_h
                         )
-                    z_fetch = max(3, min(HIMI_JP_TILE_MAX_ZOOM, z_fetch))
-                    him_mosaic = {
-                        "band": str(band),
-                        "basetime": bt,
-                        "validtime": vt,
-                        "prod_band": prod_band,
-                        "prod_name": prod_name,
-                        "lon_w": lon_w,
-                        "lon_e": lon_e,
-                        "lat_s": lat_s,
-                        "lat_n": lat_n,
-                        "z_fetch": z_fetch,
-                        "max_tiles": max_tiles,
-                        "trim_mosaic_border": bool(
-                            msc.get("trim_mosaic_border", True)
-                        ),
-                        "crop_mosaic_to_filled_tiles": bool(
-                            msc.get("crop_mosaic_to_filled_tiles", True)
-                        ),
-                        "tight_crop_mosaic": bool(msc.get("tight_crop_mosaic", True)),
-                        "tight_crop_mosaic_tol": int(
-                            msc.get("tight_crop_mosaic_tol", 16)
-                        ),
-                        "margin_black_max": int(msc.get("margin_black_max", 12)),
-                        "trim_mosaic_border_tol": int(
-                            msc.get("trim_mosaic_border_tol", 10)
-                        ),
-                    }
-                    qd: dict[str, str] = {
-                        "band": str(band),
-                        "bt": bt,
-                        "lw": f"{lon_w:.3f}",
-                        "le": f"{lon_e:.3f}",
-                        "ls": f"{lat_s:.3f}",
-                        "ln": f"{lat_n:.3f}",
-                        "zf": str(z_fetch),
-                    }
-                    if isinstance(like, dict) and like.get("enabled", False):
-                        qd["lm"] = "1"
-                        qd["lz"] = str(int(like.get("z", 5)))
-                    q = urllib.parse.urlencode(qd)
-                    jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
+                    elif isinstance(bbox, dict):
+                        lon_w = float(bbox.get("lon_w", 117.29))
+                        lon_e = float(bbox.get("lon_e", 173.54))
+                        lat_s = float(bbox.get("lat_s", 21.98))
+                        lat_n = float(bbox.get("lat_n", 50.43))
+                    else:
+                        lon_w = float(msc.get("bosai_him_lon_w", 117.29))
+                        lon_e = float(msc.get("bosai_him_lon_e", 173.54))
+                        lat_s = float(msc.get("bosai_him_lat_s", 21.98))
+                        lat_n = float(msc.get("bosai_him_lat_n", 50.43))
+
+                    if msc.get("bosai_himawari_single_tile"):
+                        jpg_url, _hhmm, _slot_iso, slot_utc = (
+                            msc_himawari_japan_jpg_url_for_ref_utc(
+                                str(band), ref_utc, msc
+                            )
+                        )
+                    else:
+                        bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
+                        prod_band, prod_name, _ = _himawari_jp_band_products(
+                            str(band)
+                        )
+                        if isinstance(like, dict) and like.get("enabled", False):
+                            z_lm = int(like.get("z", 5))
+                            z_fetch = int(like.get("fetch_zoom", z_lm))
+                        else:
+                            z_fetch = int(
+                                msc.get("bosai_fetch_zoom", HIMI_JP_TILE_MAX_ZOOM)
+                            )
+                        z_fetch = max(3, min(HIMI_JP_TILE_MAX_ZOOM, z_fetch))
+                        him_mosaic = {
+                            "band": str(band),
+                            "basetime": bt,
+                            "validtime": vt,
+                            "prod_band": prod_band,
+                            "prod_name": prod_name,
+                            "lon_w": lon_w,
+                            "lon_e": lon_e,
+                            "lat_s": lat_s,
+                            "lat_n": lat_n,
+                            "z_fetch": z_fetch,
+                            "max_tiles": max_tiles,
+                            "trim_mosaic_border": bool(
+                                msc.get("trim_mosaic_border", True)
+                            ),
+                            "crop_mosaic_to_filled_tiles": bool(
+                                msc.get("crop_mosaic_to_filled_tiles", True)
+                            ),
+                            "tight_crop_mosaic": bool(msc.get("tight_crop_mosaic", True)),
+                            "tight_crop_mosaic_tol": int(
+                                msc.get("tight_crop_mosaic_tol", 16)
+                            ),
+                            "margin_black_max": int(msc.get("margin_black_max", 12)),
+                            "trim_mosaic_border_tol": int(
+                                msc.get("trim_mosaic_border_tol", 10)
+                            ),
+                        }
+                        qd: dict[str, str] = {
+                            "band": str(band),
+                            "bt": bt,
+                            "lw": f"{lon_w:.3f}",
+                            "le": f"{lon_e:.3f}",
+                            "ls": f"{lat_s:.3f}",
+                            "ln": f"{lat_n:.3f}",
+                            "zf": str(z_fetch),
+                        }
+                        if isinstance(like, dict) and like.get("enabled", False):
+                            qd["lm"] = "1"
+                            qd["lz"] = str(int(like.get("z", 5)))
+                        q = urllib.parse.urlencode(qd)
+                        jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
                 continue
@@ -1665,19 +1779,22 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             if not ext.startswith("."):
                 ext = ".jpg"
             out_fn = f"{stem}_{slot_jst:%Y%m%d_%H%M}JST{ext}"
-            row_item: dict = {
-                "filename": out_fn,
-                "url": jpg_url,
-                "pdf_image_resolution": dpi,
-                "pdf_upscale_long_edge": up_edge_i,
-                "msc_jst_header": True,
-                "msc_header_lines": header_lines,
-                "msc_crop_right": crop_r,
-                "msc_crop_bottom": crop_b,
-                "pdf_a4_fit": True,
-                "pdf_a4_dpi": float(msc.get("print_dpi", 300)),
-                "pdf_a4_margin_mm": float(msc.get("print_margin_mm", 5)),
-                "comment": (
+            if him_snap is not None:
+                him_comment = (
+                    "気象庁防災「統合地図」"
+                    "[map.html](https://www.jma.go.jp/bosai/map.html) を **Playwright（Chromium）** で開き、"
+                    "指定 URL のビューポートを撮影した JPEG。"
+                    "地図・衛星レイヤの描画待ちは `bosai_himawari_map_screenshot.wait_ms`（既定 12 秒）。"
+                    "環境には `pip install playwright` と `playwright install chromium` が必要（Streamlit Cloud では未対応のことが多い）。"
+                    "上端の時刻帯の注記は targetTimes に基づくスロットで、**撮影画像の凡例時刻と一致しない場合があります**。"
+                    f"観測スロット注記: **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
+                    f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。{label}。"
+                    "**結合 PDF では A4 に収め印刷向け**。"
+                    f"印刷 dpi={float(msc.get('print_dpi', 300)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
+                    f"拡大（結合前）: {up_note}。"
+                )
+            else:
+                him_comment = (
                     "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
                     "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
                     "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#5/37.545/145.415/&elem=color&contents=himawari 、"
@@ -1692,10 +1809,25 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "**結合 PDF では A4（縦横は画像比で自動）1ページに全体を収め、余白付きで印刷向け**。"
                     f"印刷 dpi={float(msc.get('print_dpi', 300)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
                     f"拡大（結合前）: {up_note}。"
-                ),
+                )
+            row_item: dict = {
+                "filename": out_fn,
+                "url": jpg_url,
+                "pdf_image_resolution": dpi,
+                "pdf_upscale_long_edge": up_edge_i,
+                "msc_jst_header": True,
+                "msc_header_lines": header_lines,
+                "msc_crop_right": crop_r,
+                "msc_crop_bottom": crop_b,
+                "pdf_a4_fit": True,
+                "pdf_a4_dpi": float(msc.get("print_dpi", 300)),
+                "pdf_a4_margin_mm": float(msc.get("print_margin_mm", 5)),
+                "comment": him_comment,
             }
             if him_mosaic is not None:
                 row_item["himawari_mosaic"] = him_mosaic
+            if him_snap is not None:
+                row_item["himawari_map_screenshot"] = him_snap
             out.append(row_item)
 
     zm = cfg.get("jma_nowc_hrpns_mosaic")

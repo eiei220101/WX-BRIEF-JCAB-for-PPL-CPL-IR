@@ -91,6 +91,15 @@
   },
   "jma_msc_himawari_japan": {
     "enabled": true,
+    "bosai_himawari_map_screenshot": {
+      "enabled": true,
+      "wait_ms": 14000,
+      "viewport_width": 1440,
+      "viewport_height": 900,
+      "goto_timeout_ms": 120000,
+      "url_visible": "https://www.jma.go.jp/bosai/map.html#5/38.048/144.756/&elem=color&contents=himawari",
+      "url_infrared": "https://www.jma.go.jp/bosai/map.html#5/36.686/143.921/&elem=ir&contents=himawari"
+    },
     "bosai_map_zoom": 5,
     "bosai_fetch_zoom": 5,
     "bosai_himawari_mosaic_max_tiles": 400,

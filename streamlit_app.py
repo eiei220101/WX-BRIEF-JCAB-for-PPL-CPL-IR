@@ -5,6 +5,7 @@ Streamlit 版 WX Briefing（app.py のロジックを再利用）。
 
 最短（ローカル・Windows 推奨）:
   python -m pip install -r requirements.txt
+  python -m playwright install chromium
   python -m streamlit run streamlit_app.py
 """
 from __future__ import annotations
