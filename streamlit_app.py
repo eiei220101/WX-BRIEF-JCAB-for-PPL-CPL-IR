@@ -41,6 +41,33 @@ def _group_select_all_callback(sel_key: str, target_keys: list[str]):
     return _sync
 
 
+def _sync_select_all_from_children(sel_key: str, target_keys: list[str]) -> None:
+    """子チェックがすべてオンなら親もオン、1つでもオフなら親もオフ（親→子は on_change 側）。"""
+    if not target_keys:
+        return
+    all_on = all(bool(st.session_state.get(k, False)) for k in target_keys)
+    st.session_state[sel_key] = all_on
+
+
+def _region_title_and_select_all_row(
+    title: str, sel_key: str, target_keys: list[str]
+) -> None:
+    """地域見出しと「すべての項目を選択する」を同一行に詰めて並べる。"""
+    try:
+        c_head, c_sel = st.columns([2, 10], gap="small")
+    except TypeError:
+        c_head, c_sel = st.columns([2, 10])
+    with c_head:
+        st.markdown(f"**{title}**")
+    with c_sel:
+        _sync_select_all_from_children(sel_key, target_keys)
+        st.checkbox(
+            "すべての項目を選択する",
+            key=sel_key,
+            on_change=_group_select_all_callback(sel_key, target_keys),
+        )
+
+
 def _norm_sigwx_area(area: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(area).lower())
 
@@ -213,18 +240,10 @@ def _render_metar_taf(cfg: dict) -> None:
             continue
         with st.container(border=True):
             if title == TOHOKU_KANTO_UI_TITLE:
-                c_head, c_sel = st.columns([1, 2])
-                with c_head:
-                    st.markdown(f"**{title}**")
-                with c_sel:
-                    _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
-                    st.checkbox(
-                        "すべての項目を選択する",
-                        key="mt_selall_tohoku_kanto",
-                        on_change=_group_select_all_callback(
-                            "mt_selall_tohoku_kanto", _mt_keys
-                        ),
-                    )
+                _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
+                _region_title_and_select_all_row(
+                    title, "mt_selall_tohoku_kanto", _mt_keys
+                )
             else:
                 st.markdown(f"**{title}**")
             cols = st.columns(3)
@@ -300,21 +319,15 @@ def _render_charts_zip(cfg: dict) -> None:
                     continue
                 with st.container(border=True):
                     if title == TOHOKU_KANTO_UI_TITLE:
-                        c_head, c_sel = st.columns([1, 2])
-                        with c_head:
-                            st.markdown(f"**{title}**")
-                        with c_sel:
-                            _taf_keys = [
-                                f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
-                                for pr in plist
-                            ]
-                            st.checkbox(
-                                "すべての項目を選択する",
-                                key="merge_taf_selall_tohoku_kanto",
-                                on_change=_group_select_all_callback(
-                                    "merge_taf_selall_tohoku_kanto", _taf_keys
-                                ),
-                            )
+                        _taf_keys = [
+                            f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                            for pr in plist
+                        ]
+                        _region_title_and_select_all_row(
+                            title,
+                            "merge_taf_selall_tohoku_kanto",
+                            _taf_keys,
+                        )
                     else:
                         st.markdown(f"**{title}**")
                     cols = st.columns(3)
@@ -380,18 +393,12 @@ def _render_charts_zip(cfg: dict) -> None:
                     continue
                 with st.container(border=True):
                     if title == TOHOKU_KANTO_UI_TITLE:
-                        c_head, c_sel = st.columns([1, 2])
-                        with c_head:
-                            st.markdown(f"**{title}**")
-                        with c_sel:
-                            _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
-                            st.checkbox(
-                                "すべての項目を選択する",
-                                key="merge_dsig_selall_tohoku_kanto",
-                                on_change=_group_select_all_callback(
-                                    "merge_dsig_selall_tohoku_kanto", _ds_keys
-                                ),
-                            )
+                        _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                        _region_title_and_select_all_row(
+                            title,
+                            "merge_dsig_selall_tohoku_kanto",
+                            _ds_keys,
+                        )
                     else:
                         st.markdown(f"**{title}**")
                     dc = st.columns(4)
