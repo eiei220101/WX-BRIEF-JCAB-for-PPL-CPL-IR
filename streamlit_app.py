@@ -175,7 +175,7 @@ def _render_metar_taf(cfg: dict) -> None:
         want_met = st.checkbox("METAR", value=False, key="mt_met")
     with c2:
         want_taf = st.checkbox("TAF", value=False, key="mt_taf")
-    if st.button("METAR/TAF PDF を生成", key="mt_go"):
+    if st.button("METAR/TAF PDF を生成", type="primary", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
         elif not want_met and not want_taf:
@@ -264,22 +264,15 @@ def _render_charts_zip(cfg: dict) -> None:
         if not srows:
             st.info("config の `jma_airinfo_low_level_sigwx.products` に `area` を追加してください。")
         else:
-            gsig = getattr(wx, "group_sigwx_rows_by_region", None)
-            sblocks = gsig(srows) if callable(gsig) else [("地域", srows)]
-            for title, slist in sblocks:
-                if not slist:
-                    continue
-                with st.container(border=True):
-                    st.markdown(f"**{title}**")
-                    sc = st.columns(min(3, max(1, len(slist))))
-                    for i, sr in enumerate(slist):
-                        a = sr["area"]
-                        with sc[i % len(sc)]:
-                            st.checkbox(
-                                f"{sr['label']}（{a}）",
-                                value=False,
-                                key=f"merge_sigwx_{a}",
-                            )
+            sc = st.columns(min(3, max(1, len(srows))))
+            for i, sr in enumerate(srows):
+                a = sr["area"]
+                with sc[i % len(sc)]:
+                    st.checkbox(
+                        f"{sr['label']}（{a}）",
+                        value=False,
+                        key=f"merge_sigwx_{a}",
+                    )
         st.divider()
 
     dsig_cfg = cfg.get("jma_airinfo_low_level_detailed_sigwx")
@@ -307,7 +300,7 @@ def _render_charts_zip(cfg: dict) -> None:
                         fk = dr["fig_key"]
                         with dc[i % 4]:
                             st.checkbox(
-                                f"{dr['label']}（{fk}）",
+                                str(dr["label"]).strip(),
                                 value=False,
                                 key=f"merge_dsig_{fk}",
                             )
