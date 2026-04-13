@@ -77,23 +77,25 @@ def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
 
 
 def _inject_wx_streamlit_ui_styles() -> None:
-    """METAR 枠＝青・天気図枠＝赤、METAR/TAF 生成ボタン＝青（theme の primary は結合 PDF 用にそのまま）。"""
+    """METAR 枠＝青・天気図枠＝赤（枠線のみ。中身は既定背景のまま）、METAR/TAF 生成ボタン＝青。"""
     st.markdown(
         """
         <style>
-          [class*="st-key-wx_metar_taf_frame"] {
+          .st-key-wx_metar_taf_frame {
             border: 2px solid #2563eb !important;
             border-radius: 14px;
-            padding: 10px 12px 14px !important;
+            padding: 8px 10px 10px !important;
             margin: 8px 2px 18px 2px !important;
-            background-color: #f0f7ff !important;
+            background: transparent !important;
+            overflow: visible !important;
           }
-          [class*="st-key-wx_charts_frame"] {
+          .st-key-wx_charts_frame {
             border: 2px solid #dc2626 !important;
             border-radius: 14px;
-            padding: 10px 12px 14px !important;
+            padding: 8px 10px 10px !important;
             margin: 8px 2px 18px 2px !important;
-            background-color: #fff7f7 !important;
+            background: transparent !important;
+            overflow: visible !important;
           }
           [class*="st-key-mt_go"] button {
             background-color: #2563eb !important;
