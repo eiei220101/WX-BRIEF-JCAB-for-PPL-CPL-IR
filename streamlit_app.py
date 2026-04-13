@@ -10,6 +10,7 @@ Streamlit 版 WX Briefing（app.py のロジックを再利用）。
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import sys
@@ -49,18 +50,43 @@ def _sync_select_all_from_children(sel_key: str, target_keys: list[str]) -> None
     st.session_state[sel_key] = all_on
 
 
+def _columns_region_title_gap_checkbox():
+    """見出し・約3スペース・チェックの3列。縦位置は可能なら中央揃え。"""
+    weights = [2.15, 0.22, 9.6]
+    for kwargs in (
+        {"gap": "small", "vertical_alignment": "center"},
+        {"vertical_alignment": "center"},
+        {"gap": "small"},
+        {},
+    ):
+        try:
+            return st.columns(weights, **kwargs)
+        except TypeError:
+            continue
+    return st.columns(weights)
+
+
 def _region_title_and_select_all_row(
     title: str, sel_key: str, target_keys: list[str]
 ) -> None:
-    """地域見出しと「すべての項目を選択する」を同一行に詰めて並べる。"""
-    try:
-        c_head, c_sel = st.columns([2, 10], gap="small")
-    except TypeError:
-        c_head, c_sel = st.columns([2, 10])
-    with c_head:
-        st.markdown(f"**{title}**")
-    with c_sel:
-        _sync_select_all_from_children(sel_key, target_keys)
+    """「東北・関東」＋スペース3個分＋□すべて… を一文に近い1行で揃える。"""
+    _sync_select_all_from_children(sel_key, target_keys)
+    title_e = html.escape(title)
+    c_t, c_g, c_c = _columns_region_title_gap_checkbox()
+    line_h = "2.5rem"
+    with c_t:
+        st.markdown(
+            f'<p style="margin:0;padding:0;font-size:1rem;line-height:{line_h};">'
+            f"<strong>{title_e}</strong></p>",
+            unsafe_allow_html=True,
+        )
+    with c_g:
+        st.markdown(
+            f'<p style="margin:0;padding:0;font-size:1rem;line-height:{line_h};">'
+            "&nbsp;&nbsp;&nbsp;</p>",
+            unsafe_allow_html=True,
+        )
+    with c_c:
         st.checkbox(
             "すべての項目を選択する",
             key=sel_key,
