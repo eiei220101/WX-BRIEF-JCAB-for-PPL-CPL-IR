@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-58-himawari-bbox-z6-cap"
+PORTAL_BUILD = "20260413-59-himawari-caption-trim-xyz"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -577,28 +577,78 @@ def _himawari_jp_fetch_tile_jpeg(
     x: int,
     y_xyz: int,
 ) -> bytes | None:
-    """XYZ と TMS の y を試し、JPEG マジックで検証する。"""
+    """Web Mercator XYZ の (x,y) のみ使用（TMS の y 反転は別地域のタイルが返ることがあり結合ずれの原因になる）。"""
     n = 1 << z
-    y_candidates = [y_xyz, n - 1 - y_xyz]
-    seen: set[int] = set()
-    for y in y_candidates:
-        if y in seen or y < 0 or y >= n:
-            continue
-        seen.add(y)
-        u = _himawari_jp_satimg_tile_url(bt, vt, prod_band, prod_name, z, x, y)
-        for _attempt in range(3):
-            try:
-                data, _ = fetch_url(u, timeout=28)
-                if (
-                    isinstance(data, bytes)
-                    and len(data) > 500
-                    and data[:2] == b"\xff\xd8"
-                ):
-                    return data
-            except Exception:
-                pass
-            time.sleep(0.1 * (_attempt + 1))
+    if y_xyz < 0 or y_xyz >= n or x < 0 or x >= n:
+        return None
+    u = _himawari_jp_satimg_tile_url(
+        bt, vt, prod_band, prod_name, z, x, y_xyz
+    )
+    for _attempt in range(5):
+        try:
+            data, _ = fetch_url(u, timeout=32)
+            if (
+                isinstance(data, bytes)
+                and len(data) > 500
+                and data[:2] == b"\xff\xd8"
+            ):
+                return data
+        except Exception:
+            pass
+        time.sleep(0.08 * (_attempt + 1))
     return None
+
+
+def _himawari_trim_uniform_border(
+    im,
+    *,
+    bg: tuple[int, int, int] = (32, 36, 42),
+    tol: int = 10,
+):
+    """
+    モザイク外周の「欠損タイル用の均一背景」だけを切り落とす（海・雲は残る）。
+    上下左右から、行・列が背景色に近い限りトリムする。
+    """
+    im = im.convert("RGB")
+    w, h = im.size
+    if w < 8 or h < 8:
+        return im
+    px = im.load()
+
+    def is_bg_pixel(x: int, y: int) -> bool:
+        p = px[x, y]
+        return (
+            abs(p[0] - bg[0]) <= tol
+            and abs(p[1] - bg[1]) <= tol
+            and abs(p[2] - bg[2]) <= tol
+        )
+
+    t = 0
+    while t < h:
+        if not all(is_bg_pixel(x, t) for x in range(w)):
+            break
+        t += 1
+    b = h - 1
+    while b >= t:
+        if not all(is_bg_pixel(x, b) for x in range(w)):
+            break
+        b -= 1
+    l = 0
+    while l < w:
+        if not all(is_bg_pixel(l, y) for y in range(t, b + 1)):
+            break
+        l += 1
+    r = w - 1
+    while r >= l:
+        if not all(is_bg_pixel(r, y) for y in range(t, b + 1)):
+            break
+        r -= 1
+    if r < l or b < t:
+        return im
+    cw, ch = r - l + 1, b - t + 1
+    if cw < 32 or ch < 32:
+        return im
+    return im.crop((l, t, r + 1, b + 1))
 
 
 def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
@@ -609,6 +659,9 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     config の bosai_himawari_bbox 等で指定する。
     """
     from PIL import Image
+
+    _mp = getattr(Image, "MAX_IMAGE_PIXELS", 0) or 178_956_970
+    Image.MAX_IMAGE_PIXELS = max(_mp, 500_000_000)
 
     band = str(opts.get("band") or "")
     bt = str(opts.get("basetime") or "")
@@ -660,12 +713,22 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         return (xy, blob)
 
     tile_map: dict[tuple[int, int], bytes | None] = {}
-    n_workers = min(16, max(4, len(coords)))
+    n_workers = min(8, max(4, len(coords) // 6 + 1))
     with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
         futs = [ex.submit(load_one, xy) for xy in coords]
         for fut in concurrent.futures.as_completed(futs):
             xy, blob = fut.result()
             tile_map[xy] = blob
+
+    failed = [xy for xy in coords if not tile_map.get(xy)]
+    if failed:
+        time.sleep(0.25)
+        for xy in failed:
+            blob = _himawari_jp_fetch_tile_jpeg(
+                bt, vt, prod_band, prod_name, z, xy[0], xy[1]
+            )
+            if blob:
+                tile_map[xy] = blob
 
     first: bytes | None = None
     for xy in coords:
@@ -698,6 +761,9 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
                 canvas.paste(im, (ox, oy))
             except Exception:
                 continue
+
+    if bool(opts.get("trim_mosaic_border", True)):
+        canvas = _himawari_trim_uniform_border(canvas)
 
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
@@ -928,6 +994,9 @@ def _msc_postprocess_jpg(
     """
     from PIL import Image, ImageDraw
 
+    _mp = getattr(Image, "MAX_IMAGE_PIXELS", 0) or 178_956_970
+    Image.MAX_IMAGE_PIXELS = max(_mp, 500_000_000)
+
     im = Image.open(io.BytesIO(jpeg_data)).convert("RGB")
     w, h = im.size
     cr = max(0, min(int(crop_right), w // 3))
@@ -941,12 +1010,13 @@ def _msc_postprocess_jpg(
         im.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
         return buf.getvalue()
 
-    pad_x = 8
+    pad_x = max(10, w // 200)
     max_w = max(40, w - 2 * pad_x)
     probe = Image.new("RGB", (w, 4), (255, 255, 255))
     draw_p = ImageDraw.Draw(probe)
-    fs = 20
-    for cand in range(22, 5, -1):
+    fs_hi = min(42, max(20, w // 48))
+    fs = 14
+    for cand in range(fs_hi, 8, -1):
         font = _hrpns_caption_font(cand)
         ok = True
         for line in lines:
@@ -959,10 +1029,10 @@ def _msc_postprocess_jpg(
             fs = cand
             break
     else:
-        fs = 8
+        fs = 10
     font = _hrpns_caption_font(fs)
-    line_h = int(fs * 1.42)
-    bar = line_h * len(lines) + 18
+    line_h = int(fs * 1.48)
+    bar = line_h * len(lines) + max(22, w // 120)
     out = Image.new("RGB", (w, h + bar), (245, 247, 250))
     out.paste(im, (0, bar))
     draw = ImageDraw.Draw(out)
@@ -1110,15 +1180,20 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
     if isinstance(url, str) and url.startswith(WXBRIEFING_HRPNS_MOSAIC):
         raw = build_hrpns_mosaic_png_bytes(item.get("hrpns_mosaic") or {})
         return raw, "image/png"
-    if isinstance(url, str) and url.startswith(WXBRIEFING_HIMI_JP_MOSAIC):
-        raw = build_himawari_jp_mosaic_jpeg_bytes(item.get("himawari_mosaic") or {})
-        return raw, "image/jpeg"
     if isinstance(url, str) and url.startswith(WXBRIEFING_AIRINFO_TAF_MERGED):
         raw = build_airinfo_taf_merged_pdf_bytes(item, timeout=timeout)
         return raw, "application/pdf"
     if not url:
         raise ValueError("URL がありません")
-    data, ctype = fetch_url(str(url), timeout=timeout)
+
+    if isinstance(url, str) and url.startswith(WXBRIEFING_HIMI_JP_MOSAIC):
+        data, ctype = (
+            build_himawari_jp_mosaic_jpeg_bytes(item.get("himawari_mosaic") or {}),
+            "image/jpeg",
+        )
+    else:
+        data, ctype = fetch_url(str(url), timeout=timeout)
+
     if item.get("msc_jst_header") and isinstance(data, bytes) and len(data) > 64:
         ctlow = (ctype or "").lower()
         if "jpeg" in ctlow or "jpg" in ctlow:
@@ -1337,6 +1412,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                         "lat_n": lat_n,
                         "z_fetch": z_fetch,
                         "max_tiles": max_tiles,
+                        "trim_mosaic_border": bool(
+                            msc.get("trim_mosaic_border", True)
+                        ),
                     }
                     q = urllib.parse.urlencode({"band": str(band), "bt": bt})
                     jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
