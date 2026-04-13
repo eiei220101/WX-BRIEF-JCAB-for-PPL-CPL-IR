@@ -26,6 +26,20 @@ if str(_ROOT) not in sys.path:
 
 import app as wx  # noqa: E402
 
+# UI 地域見出し（app.py の UI_REGION_GROUPS_* の title と一致させる）
+TOHOKU_KANTO_UI_TITLE = "東北・関東"
+
+
+def _group_select_all_callback(sel_key: str, target_keys: list[str]):
+    """「すべての項目を選択する」用: sel_key の真偽で target_keys を一括オン/オフ。"""
+
+    def _sync() -> None:
+        v = bool(st.session_state.get(sel_key, False))
+        for k in target_keys:
+            st.session_state[k] = v
+
+    return _sync
+
 
 def _norm_sigwx_area(area: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(area).lower())
@@ -198,7 +212,21 @@ def _render_metar_taf(cfg: dict) -> None:
         if not aps:
             continue
         with st.container(border=True):
-            st.markdown(f"**{title}**")
+            if title == TOHOKU_KANTO_UI_TITLE:
+                c_head, c_sel = st.columns([1, 2])
+                with c_head:
+                    st.markdown(f"**{title}**")
+                with c_sel:
+                    _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
+                    st.checkbox(
+                        "すべての項目を選択する",
+                        key="mt_selall_tohoku_kanto",
+                        on_change=_group_select_all_callback(
+                            "mt_selall_tohoku_kanto", _mt_keys
+                        ),
+                    )
+            else:
+                st.markdown(f"**{title}**")
             cols = st.columns(3)
             for i, ap in enumerate(aps):
                 icao = ap["icao"]
@@ -271,7 +299,24 @@ def _render_charts_zip(cfg: dict) -> None:
                 if not plist:
                     continue
                 with st.container(border=True):
-                    st.markdown(f"**{title}**")
+                    if title == TOHOKU_KANTO_UI_TITLE:
+                        c_head, c_sel = st.columns([1, 2])
+                        with c_head:
+                            st.markdown(f"**{title}**")
+                        with c_sel:
+                            _taf_keys = [
+                                f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                                for pr in plist
+                            ]
+                            st.checkbox(
+                                "すべての項目を選択する",
+                                key="merge_taf_selall_tohoku_kanto",
+                                on_change=_group_select_all_callback(
+                                    "merge_taf_selall_tohoku_kanto", _taf_keys
+                                ),
+                            )
+                    else:
+                        st.markdown(f"**{title}**")
                     cols = st.columns(3)
                     for i, pr in enumerate(plist):
                         icao = str(pr.get("icao")).strip().upper()
@@ -334,7 +379,21 @@ def _render_charts_zip(cfg: dict) -> None:
                 if not dlist:
                     continue
                 with st.container(border=True):
-                    st.markdown(f"**{title}**")
+                    if title == TOHOKU_KANTO_UI_TITLE:
+                        c_head, c_sel = st.columns([1, 2])
+                        with c_head:
+                            st.markdown(f"**{title}**")
+                        with c_sel:
+                            _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                            st.checkbox(
+                                "すべての項目を選択する",
+                                key="merge_dsig_selall_tohoku_kanto",
+                                on_change=_group_select_all_callback(
+                                    "merge_dsig_selall_tohoku_kanto", _ds_keys
+                                ),
+                            )
+                    else:
+                        st.markdown(f"**{title}**")
                     dc = st.columns(4)
                     for i, dr in enumerate(dlist):
                         fk = dr["fig_key"]
