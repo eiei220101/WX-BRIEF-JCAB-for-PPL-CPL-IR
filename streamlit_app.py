@@ -324,8 +324,9 @@ def main() -> None:
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(
-        f"ビルド: {wx.PORTAL_BUILD} · Streamlit 版"
-        " — この文字列が GitHub の **app.py** 内の **`PORTAL_BUILD`** と同じなら、公開中は最新コードです。"
+        f"ビルド: {wx.portal_build_stamp()} · Streamlit 版"
+        " — 手動ラベル（`PORTAL_BUILD`）・**app.py の最終更新（UTC）**・（リポジトリ内なら）**git の短いコミット**。"
+        " 更新時刻が直近の保存と一致すれば、このアプリが読み込んでいる **app.py** は新しいです。"
     )
 
     with st.sidebar:

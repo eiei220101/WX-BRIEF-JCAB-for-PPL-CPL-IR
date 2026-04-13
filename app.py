@@ -46,6 +46,65 @@ CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
 PORTAL_BUILD = "20260414-75-streamlit-taf-merge-select"
+
+_PORTAL_APP_PATH = Path(__file__).resolve()
+_PORTAL_GIT_ONCE: str | None = None
+
+
+def _portal_git_short_once() -> str:
+    """リポジトリ内なら短いコミット（未コミット変更ありは -dirty）。失敗時は空（1 プロセスで 1 回だけ試行）。"""
+    global _PORTAL_GIT_ONCE
+    if _PORTAL_GIT_ONCE is not None:
+        return _PORTAL_GIT_ONCE
+    try:
+        root = _PORTAL_APP_PATH.parent
+        cp = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if cp.returncode != 0 or not (cp.stdout or "").strip():
+            _PORTAL_GIT_ONCE = ""
+            return _PORTAL_GIT_ONCE
+        h = cp.stdout.strip()
+        try:
+            cp2 = subprocess.run(
+                ["git", "diff", "--quiet"],
+                cwd=root,
+                timeout=2,
+            )
+            if cp2.returncode != 0:
+                h += "-dirty"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        _PORTAL_GIT_ONCE = h
+    except (OSError, subprocess.TimeoutExpired):
+        _PORTAL_GIT_ONCE = ""
+    if _PORTAL_GIT_ONCE is None:
+        _PORTAL_GIT_ONCE = ""
+    return _PORTAL_GIT_ONCE
+
+
+def portal_build_stamp() -> str:
+    """
+    画面・HTTP ヘッダ用の実行識別子（毎回評価するときは app.py の mtime が更新される）。
+    PORTAL_BUILD（手動ラベル）に加え、ファイル更新時刻（UTC）と、利用可能なら git の短いコミット。
+    """
+    try:
+        m = _PORTAL_APP_PATH.stat().st_mtime
+    except OSError:
+        mtime_s = "?"
+    else:
+        mtime_s = datetime.fromtimestamp(m, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    parts = [PORTAL_BUILD, f"app.py {mtime_s}"]
+    g = _portal_git_short_once()
+    if g:
+        parts.append(f"git {g}")
+    return " | ".join(parts)
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -3345,7 +3404,7 @@ def page_html(cfg: dict) -> str:
     list_head = (
         f"資料一覧（{n_valid}件）" if n_valid else "資料一覧"
     )
-    build_e = html.escape(PORTAL_BUILD)
+    build_e = html.escape(portal_build_stamp())
     app_path_e = html.escape(str(Path(__file__).resolve()))
     metar_taf_block = html_metar_taf_panel(cfg)
     metar_taf_section = ""
@@ -3544,11 +3603,11 @@ def page_html(cfg: dict) -> str:
   </style>
 </head>
 <body>
-  <!-- WXBriefing build={PORTAL_BUILD} -->
+  <!-- WXBriefing {build_e} -->
   <div class="wrap">
     <header>
       <div class="build-strip">
-        <p class="build-strip-line">このサーバーの版: <strong>{build_e}</strong> · ポート <strong>{port}</strong>。<kbd>Ctrl</kbd>+<kbd>F5</kbd> か <a class="build-strip-link" href="/?_reload=1">開き直す</a>。版が古いときは「別フォルダの app.py が動いている」ことが多いです。</p>
+        <p class="build-strip-line">このサーバーの版: <strong>{build_e}</strong> · ポート <strong>{port}</strong>。<kbd>Ctrl</kbd>+<kbd>F5</kbd> か <a class="build-strip-link" href="/?_reload=1">開き直す</a>。表示の <strong>app.py</strong> の更新時刻（UTC）が、いま編集したファイルの保存時刻と一致するか確認してください。版が古いときは「別フォルダの app.py が動いている」ことが多いです。</p>
         <p class="build-strip-path">いま応答している <strong>app.py</strong>（Cursor で編集しているフォルダの <code>app.py</code> と<strong>文字列が完全一致</strong>するか確認）:<code>{app_path_e}</code></p>
       </div>
       <h1>{title_e}</h1>
@@ -3605,7 +3664,7 @@ def page_html(cfg: dict) -> str:
     </div>
 
     <footer>
-      ポート {port} · <a href="/debug">動作確認</a> · ビルド {PORTAL_BUILD}<br>
+      ポート {port} · <a href="/debug">動作確認</a> · ビルド {build_e}<br>
       ブラウザのアドレスは <strong>http://</strong>（https ではない）で開いてください。
     </footer>
   </div>
@@ -3762,7 +3821,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(400)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
-            self.send_header("X-WXBriefing-Build", PORTAL_BUILD)
+            self.send_header("X-WXBriefing-Build", portal_build_stamp())
             self.end_headers()
             self.wfile.write(b)
             return
@@ -3772,7 +3831,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(400)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(b)))
-            self.send_header("X-WXBriefing-Build", PORTAL_BUILD)
+            self.send_header("X-WXBriefing-Build", portal_build_stamp())
             self.end_headers()
             self.wfile.write(b)
             return
@@ -3787,7 +3846,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
         self.send_header("Content-Length", str(len(pdf)))
-        self.send_header("X-WXBriefing-Build", PORTAL_BUILD)
+        self.send_header("X-WXBriefing-Build", portal_build_stamp())
         self.send_header("Cache-Control", "no-store")
         if warns:
             self.send_header("X-Download-Warnings", _header_safe_ascii("; ".join(warns)))
@@ -3812,7 +3871,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
             self.send_header("Pragma", "no-cache")
-            self.send_header("X-WXBriefing-Build", PORTAL_BUILD)
+            self.send_header("X-WXBriefing-Build", portal_build_stamp())
             self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(html)))
             self.end_headers()
@@ -3822,7 +3881,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/debug":
             app_p = Path(__file__).resolve()
             lines = [
-                f"build={PORTAL_BUILD}",
+                f"build={portal_build_stamp()}",
                 f"app={app_p}",
                 f"config={CONFIG_PATH.resolve()}",
                 f"cwd={Path.cwd()}",
@@ -3835,7 +3894,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-WXBriefing-Build", PORTAL_BUILD)
+            self.send_header("X-WXBriefing-Build", portal_build_stamp())
             self.send_header("Connection", "close")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -3992,7 +4051,7 @@ def main() -> None:
     print(" ", app_path)
     print("設定ファイル:")
     print(" ", cfg_path)
-    print(f"ビルド: {PORTAL_BUILD}  待受: {listen_host}:{port}")
+    print(f"ビルド: {portal_build_stamp()}  待受: {listen_host}:{port}")
     print("※ ブラウザのアドレスは必ず http:// で始めてください（https:// だと ERR_EMPTY_RESPONSE になります）。")
     print()
     if listen_host == "0.0.0.0":

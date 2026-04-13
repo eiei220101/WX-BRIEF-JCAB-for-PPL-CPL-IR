@@ -4,8 +4,9 @@ globs: "**/*.{py,md,json}"
 alwaysApply: true
 ---
 
-# 最新ビルド（PORTAL_BUILD）
+# 最新ビルド（PORTAL_BUILD / portal_build_stamp）
 
-- **真実のソース**はリポジトリ直下の `app.py` の **`PORTAL_BUILD = "…"`** 1 行だけ。会話や記憶の文字列ではなく、**いまのファイルを読んだ値**をユーザーに伝える。
-- Streamlit では **`ビルド: … · Streamlit 版`** のキャプションがこの定数を表示している。**その文字列が GitHub の `app.py` の `PORTAL_BUILD` と一致していれば**、公開アプリはそのコミットの最新版とみなせる。
-- ユーザーが「最新か」「ビルドは？」と聞いたら、**上記の読み方**を短く案内し、必要なら `app.py` の該当行を引用する。
+- **手動リリースラベル**は `app.py` の **`PORTAL_BUILD = "…"`**。会話や記憶ではなく、**いまのファイルを読んだ値**を伝える。
+- 画面・HTTP ヘッダでは **`portal_build_stamp()`**（`PORTAL_BUILD` + **`app.py` の mtime（UTC）** + 利用可能なら **git 短コミット**）が使われる。Streamlit の **`ビルド: … · Streamlit 版`** はこのスタンプ。
+- **「いま動いているコード」**の切り分けは、表示の **app.py 更新時刻**がローカル保存と一致するか、および **`app.py` の絶対パス**（ポータル HTML の build-strip）で行う。
+- ユーザーが「最新か」「ビルドは？」と聞いたら、上記を短く案内し、必要なら `PORTAL_BUILD` 行と `portal_build_stamp()` の意味を説明する。
