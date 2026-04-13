@@ -31,21 +31,32 @@ import app as wx  # noqa: E402
 
 
 def _auth_expected() -> tuple[str, str]:
-    """Streamlit Secrets 優先、なければ config.json の http_auth。"""
+    """
+    Streamlit Cloud: Secrets にユーザー名・パスワードが両方あるときだけ採用。
+    それ以外は config.json の http_auth（ローカルと同じルール）。
+    """
     try:
-        u = str(st.secrets["AUTH_USERNAME"]).strip()
-        p = str(st.secrets["AUTH_PASSWORD"])
-        return u, p
+        sec = st.secrets
+        u = str(sec["AUTH_USERNAME"]).strip()
+        p = str(sec["AUTH_PASSWORD"])
+        if u and p:
+            return u, p
     except Exception:
-        cfg = wx.load_config()
-        block = cfg.get("http_auth")
-        if isinstance(block, dict):
-            return str(block.get("username") or "").strip(), str(block.get("password") or "")
-        return "", ""
+        pass
+    cfg = wx.load_config()
+    block = cfg.get("http_auth")
+    if isinstance(block, dict):
+        return str(block.get("username") or "").strip(), str(block.get("password") or "")
+    return "", ""
 
 
 def _ensure_login() -> bool:
     if st.session_state.get("_auth_ok"):
+        return True
+    cfg = wx.load_config()
+    block = cfg.get("http_auth")
+    if isinstance(block, dict) and not bool(block.get("enabled")):
+        # app.py の HTTP サーバと同様: 認証オフならログイン不要
         return True
     st.title("WX Briefing")
     st.caption("ログインしてください。")
@@ -252,10 +263,12 @@ def main() -> None:
     )
 
     with st.sidebar:
-        st.subheader("アカウント")
-        if st.button("ログアウト"):
-            st.session_state["_auth_ok"] = False
-            st.rerun()
+        ha = cfg.get("http_auth")
+        if isinstance(ha, dict) and bool(ha.get("enabled")):
+            st.subheader("アカウント")
+            if st.button("ログアウト"):
+                st.session_state["_auth_ok"] = False
+                st.rerun()
 
     _render_metar_taf(cfg)
     st.divider()
