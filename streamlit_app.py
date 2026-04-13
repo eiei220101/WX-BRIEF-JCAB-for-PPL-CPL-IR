@@ -76,6 +76,44 @@ def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
     return out
 
 
+def _inject_wx_streamlit_ui_styles() -> None:
+    """METAR 枠＝青・天気図枠＝赤、METAR/TAF 生成ボタン＝青（theme の primary は結合 PDF 用にそのまま）。"""
+    st.markdown(
+        """
+        <style>
+          [class*="st-key-wx_metar_taf_frame"] {
+            border: 2px solid #2563eb !important;
+            border-radius: 14px;
+            padding: 10px 12px 14px !important;
+            margin: 8px 2px 18px 2px !important;
+            background-color: #f0f7ff !important;
+          }
+          [class*="st-key-wx_charts_frame"] {
+            border: 2px solid #dc2626 !important;
+            border-radius: 14px;
+            padding: 10px 12px 14px !important;
+            margin: 8px 2px 18px 2px !important;
+            background-color: #fff7f7 !important;
+          }
+          [class*="st-key-mt_go"] button {
+            background-color: #2563eb !important;
+            border: 1px solid #1d4ed8 !important;
+            color: #ffffff !important;
+          }
+          [class*="st-key-mt_go"] button:hover {
+            background-color: #1d4ed8 !important;
+            border-color: #1e40af !important;
+            color: #ffffff !important;
+          }
+          [class*="st-key-mt_go"] button:focus-visible {
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35) !important;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _wx_build_display() -> str:
     """Streamlit Cloud が古い app.py のときも落ちない（portal_build_stamp 未実装なら PORTAL_BUILD のみ）。"""
     fn = getattr(wx, "portal_build_stamp", None)
@@ -175,7 +213,7 @@ def _render_metar_taf(cfg: dict) -> None:
         want_met = st.checkbox("METAR", value=False, key="mt_met")
     with c2:
         want_taf = st.checkbox("TAF", value=False, key="mt_taf")
-    if st.button("METAR/TAF PDF を生成", type="primary", key="mt_go"):
+    if st.button("METAR/TAF PDF を生成", type="secondary", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
         elif not want_met and not want_taf:
@@ -497,6 +535,8 @@ def main() -> None:
     if not _ensure_login():
         return
 
+    _inject_wx_streamlit_ui_styles()
+
     cfg = _cfg_cached()
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
@@ -514,9 +554,11 @@ def main() -> None:
                 st.session_state["_auth_ok"] = False
                 st.rerun()
 
-    _render_metar_taf(cfg)
+    with st.container(key="wx_metar_taf_frame"):
+        _render_metar_taf(cfg)
     st.divider()
-    _render_charts_zip(cfg)
+    with st.container(key="wx_charts_frame"):
+        _render_charts_zip(cfg)
     st.divider()
     _render_file_list(cfg)
 
