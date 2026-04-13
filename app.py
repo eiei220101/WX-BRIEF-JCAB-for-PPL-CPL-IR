@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-71-himawari-screenshot-map-only-2x"
+PORTAL_BUILD = "20260413-72-himawari-screenshot-dom-obs-time"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -1033,6 +1033,82 @@ def _himawari_map_screenshot_element_png(
     return page.screenshot(type="png", full_page=False)
 
 
+def _himawari_bosai_map_read_observation_time(page) -> datetime | None:
+    """
+    統合地図ページ上の「YYYY年M月D日H時mm分[ss秒]」（日本時間）を DOM から推定する。
+    地図凡例と一致しやすいよう、「秒」付きの表記を優先し、同一テキスト内では末尾に近い一致を採用する。
+    """
+    pat = re.compile(
+        r"(\d{4})年(\d{1,2})月(\d{1,2})日(\d{1,2})時(\d{1,2})分(?:(\d{1,2})秒)?"
+    )
+    chunks: list[str] = []
+    for sel in (".leaflet-container", "#contents-inner", "body"):
+        try:
+            t = page.locator(sel).first.inner_text(timeout=6000)
+            if t:
+                chunks.append(t)
+        except Exception:
+            continue
+    try:
+        extra = page.evaluate(
+            """() => {
+              const s = [];
+              for (const e of document.querySelectorAll(
+                  '[title],[aria-label],[data-time],[data-observation-time]'
+              )) {
+                s.push(
+                  e.getAttribute('title') || '',
+                  e.getAttribute('aria-label') || '',
+                  e.getAttribute('data-time') || '',
+                  e.getAttribute('data-observation-time') || ''
+                );
+              }
+              return s.join('\\n');
+            }"""
+        )
+        if isinstance(extra, str) and extra.strip():
+            chunks.append(extra)
+    except Exception:
+        pass
+    combined = "\n".join(chunks)
+    hits = list(pat.finditer(combined))
+    if not hits:
+        return None
+    best_m = hits[0]
+    best_key: tuple[int, int] = (-1, -1)
+    for m in hits:
+        has_sec = m.group(6) is not None
+        k = (2 if has_sec else 1, m.end())
+        if k > best_key:
+            best_key = k
+            best_m = m
+    y = int(best_m.group(1))
+    mo = int(best_m.group(2))
+    d = int(best_m.group(3))
+    h = int(best_m.group(4))
+    mi = int(best_m.group(5))
+    sec = int(best_m.group(6) or 0)
+    try:
+        jst = datetime(y, mo, d, h, mi, sec, tzinfo=JST)
+        return jst.astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def _himawari_msc_header_lines_for_obs_utc(obs_utc: datetime) -> list[str]:
+    """MSC 衛星キャプション2行（日本時間表記＋UTC）。"""
+    u = obs_utc.astimezone(UTC) if obs_utc.tzinfo else obs_utc.replace(tzinfo=UTC)
+    jst = u.astimezone(JST)
+    utc_main = u.strftime("%Y-%m-%d %H:%M")
+    return [
+        (
+            f"観測（日本時間）{jst.year}年{jst.month}月{jst.day}日"
+            f"{jst.hour}時{jst.minute:02d}分"
+        ),
+        f"UTC {utc_main}",
+    ]
+
+
 def _ensure_playwright_chromium_runtime() -> None:
     """
     ``pip install playwright`` だけではブラウザバイナリが無い環境（Streamlit Community Cloud 等）向けに、
@@ -1095,9 +1171,14 @@ def _ensure_playwright_chromium_runtime() -> None:
         _playwright_chromium_ready = True
 
 
-def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
+def build_himawari_bosai_map_screenshot_jpeg_bytes(
+    opts: dict,
+) -> tuple[bytes, datetime | None]:
     """
     防災統合地図（map.html）を headless Chromium で開き、**地図パネル（Leaflet）中心**の JPEG を返す。
+
+    戻り値の datetime はページ DOM から読んだ観測時刻（日本時間表記の解釈結果・UTC  aware）。
+    取得できたときは fetch 側でキャプションとファイル名をこれに合わせる。
 
     既定では広告 iframe を非表示にし、``.leaflet-container`` 系セレクタで地図 DOM だけを切り出す。
     ``device_scale_factor``（既定 2）でピクセル密度を上げ、地図部分の解像感を高める。
@@ -1126,6 +1207,7 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
     dsf = float(opts.get("device_scale_factor", 2))
     dsf = max(1.0, min(3.0, dsf))
     hide_ads = bool(opts.get("hide_ad_overlays", True))
+    use_dom_time = bool(opts.get("use_dom_observation_time", True))
 
     try:
         from playwright.sync_api import sync_playwright
@@ -1161,6 +1243,12 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
                 except Exception:
                     pass
                 page.wait_for_timeout(600)
+            obs_dom: datetime | None = None
+            if use_dom_time:
+                try:
+                    obs_dom = _himawari_bosai_map_read_observation_time(page)
+                except Exception:
+                    obs_dom = None
             png = _himawari_map_screenshot_element_png(
                 page,
                 clip_selector=clip_selector,
@@ -1174,7 +1262,7 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
     im = Image.open(io.BytesIO(png)).convert("RGB")
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=93, subsampling=0, optimize=True)
-    return buf.getvalue()
+    return buf.getvalue(), obs_dom
 
 
 def msc_himawari_japan_jpg_url_for_ref_utc(
@@ -1604,10 +1692,19 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
             raise ValueError(
                 "統合地図スクショ: item に himawari_map_screenshot.page_url がありません"
             )
-        data, ctype = (
-            build_himawari_bosai_map_screenshot_jpeg_bytes(snap),
-            "image/jpeg",
-        )
+        raw_jpg, obs_dom = build_himawari_bosai_map_screenshot_jpeg_bytes(snap)
+        data, ctype = raw_jpg, "image/jpeg"
+        if isinstance(obs_dom, datetime) and obs_dom.tzinfo is not None:
+            item["msc_header_lines"] = _himawari_msc_header_lines_for_obs_utc(obs_dom)
+            fn0 = str(item.get("filename") or "")
+            fn1 = re.sub(
+                r"_(\d{8})_(\d{4})JST(?=\.[A-Za-z0-9]+$)",
+                f"_{obs_dom.astimezone(JST):%Y%m%d_%H%M}JST",
+                fn0,
+                count=1,
+            )
+            if fn1 != fn0:
+                item["filename"] = fn1
     else:
         data, ctype = fetch_url(str(url), timeout=timeout)
 
@@ -1812,6 +1909,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                         "clip_selector": str(snap.get("clip_selector") or "").strip(),
                         "device_scale_factor": float(snap.get("device_scale_factor", 2)),
                         "hide_ad_overlays": bool(snap.get("hide_ad_overlays", True)),
+                        "use_dom_observation_time": bool(
+                            snap.get("use_dom_observation_time", True)
+                        ),
                     }
                     if isinstance(mcs, list) and mcs:
                         him_snap["map_clip_selectors"] = [
@@ -1943,9 +2043,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "`device_scale_factor` で解像度を上げられる。地図の描画待ちは `wait_ms`。"
                     "初回は Chromium バイナリを自動ダウンロードする（`packages.txt` の OS ライブラリが必要）。"
                     "手元では `playwright install chromium` でも可。`WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1` で自動 DL を止められる。"
-                    "上端の時刻帯の注記は targetTimes に基づくスロットで、**撮影画像の凡例時刻と一致しない場合があります**。"
-                    f"観測スロット注記: **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
-                    f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。{label}。"
+                    "上端の観測時刻は **ページ DOM から読み取った値**（地図凡例に近い表記）に合わせ、取得時にキャプション・ファイル名も更新する（`use_dom_observation_time`）。"
+                    f"一覧上の仮時刻（targetTimes ベース）: **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
+                    f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**（ダウンロード時は DOM が優先）。{label}。"
                     "**結合 PDF では A4 に収め印刷向け**。"
                     f"印刷 dpi={float(msc.get('print_dpi', 300)):g}、余白約 {float(msc.get('print_margin_mm', 5)):g}mm。"
                     f"拡大（結合前）: {up_note}。"

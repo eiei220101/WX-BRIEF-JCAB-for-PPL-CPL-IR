@@ -99,6 +99,7 @@
       "goto_timeout_ms": 120000,
       "device_scale_factor": 2,
       "hide_ad_overlays": true,
+      "use_dom_observation_time": true,
       "map_clip_selectors": [
         "#contents-inner .leaflet-container",
         ".leaflet-container"
