@@ -91,17 +91,26 @@
   },
   "jma_msc_himawari_japan": {
     "enabled": true,
-    "bosai_map_zoom": 4,
-    "bosai_fetch_zoom": 6,
+    "bosai_map_zoom": 5,
+    "bosai_fetch_zoom": 5,
     "bosai_himawari_mosaic_max_tiles": 400,
-    "bosai_himawari_bbox": {
-      "lon_w": 104.0,
-      "lon_e": 155.0,
-      "lat_s": 21.0,
-      "lat_n": 55.35
+    "bosai_himawari_like_map": {
+      "enabled": true,
+      "z": 5,
+      "lat": 37.545,
+      "lon": 145.415,
+      "vp_w": 1280,
+      "vp_h": 820,
+      "fetch_zoom": 5
     },
-    "bosai_map_lat": 36.0,
-    "bosai_map_lon": 138.0,
+    "bosai_himawari_bbox": {
+      "lon_w": 117.29,
+      "lon_e": 173.54,
+      "lat_s": 21.98,
+      "lat_n": 50.43
+    },
+    "bosai_map_lat": 37.545,
+    "bosai_map_lon": 145.415,
     "crop_logo_right": 108,
     "crop_logo_bottom": 44,
     "print_dpi": 300,

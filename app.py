@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-64-himawari-bbox-china-tw-south100km"
+PORTAL_BUILD = "20260413-65-himawari-like-map-hash-viewport"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -480,6 +480,57 @@ def _jma_tile_range_lonlat(
     return x_min, x_max, y_min, y_max
 
 
+def _himawari_world_px_latlon(wx: float, wy: float, z: int) -> tuple[float, float]:
+    """Web Mercator（Slippy）世界画素座標 → (lon, lat) 度。"""
+    n = 256 * (2**z)
+    lon = wx / n * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1.0 - 2.0 * wy / n))))
+    return lon, lat
+
+
+def _himawari_world_px_from_latlon(lat: float, lon: float, z: int) -> tuple[float, float]:
+    """緯度経度（度）→ 世界画素座標（連続値）。"""
+    lat_rad = math.radians(lat)
+    n = 256 * (2**z)
+    wx = (lon + 180.0) / 360.0 * n
+    wy = (
+        (1.0 - math.log(math.tan(lat_rad) + 1.0 / math.cos(lat_rad)) / math.pi)
+        / 2.0
+        * n
+    )
+    return wx, wy
+
+
+def _himawari_bbox_from_map_viewport(
+    z: int,
+    center_lat: float,
+    center_lon: float,
+    vp_w_px: float = 1280.0,
+    vp_h_px: float = 820.0,
+) -> tuple[float, float, float, float]:
+    """
+    防災統合地図 ``#z/lat/lon/`` と同系: ズーム z・中心 (lat,lon)・地図キャンバス画素 vp_w×vp_h で
+    見えている範囲に近い lon_w, lon_e, lat_s, lat_n（南＝lat_s、北＝lat_n）。
+
+    ``vp_*`` はブラウザの地図枠のおおよそ（既定 1280×820）。窓を広げると西の大陸側まで含みやすい。
+    参照: https://www.jma.go.jp/bosai/map.html#5/37.545/145.415/&elem=color&contents=himawari
+    """
+    cx, cy = _himawari_world_px_from_latlon(center_lat, center_lon, z)
+    corners = (
+        (cx - vp_w_px / 2, cy - vp_h_px / 2),
+        (cx + vp_w_px / 2, cy - vp_h_px / 2),
+        (cx - vp_w_px / 2, cy + vp_h_px / 2),
+        (cx + vp_w_px / 2, cy + vp_h_px / 2),
+    )
+    lons: list[float] = []
+    lats: list[float] = []
+    for wx, wy in corners:
+        lo, la = _himawari_world_px_latlon(wx, wy, z)
+        lons.append(lo)
+        lats.append(la)
+    return (min(lons), max(lons), min(lats), max(lats))
+
+
 def _fetch_himawari_jp_target_times() -> list:
     """防災ひまわり日本域タイル用 targetTimes_jp.json（短時間キャッシュ）。"""
     global _himawari_jp_times_cache
@@ -691,7 +742,7 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
     緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
 
-    描画範囲は lon_w〜lon_e / lat_s〜lat_n（既定: 西は大陸側まで104°E付近、東155°E、北は樺太北端＋約80km、南は台湾南端から約100km南≈21°N）。
+    描画範囲は lon_w〜lon_e / lat_s〜lat_n。config の bosai_himawari_like_map で統合地図 #z/lat/lon に合わせて自動算出も可。
     """
     from PIL import Image
 
@@ -707,10 +758,10 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         pb, pn, _ = _himawari_jp_band_products(band)
         prod_band, prod_name = pb, pn
 
-    lon_w = float(opts.get("lon_w", 104.0))
-    lon_e = float(opts.get("lon_e", 155.0))
-    lat_s = float(opts.get("lat_s", 21.0))
-    lat_n = float(opts.get("lat_n", 55.35))
+    lon_w = float(opts.get("lon_w", 117.29))
+    lon_e = float(opts.get("lon_e", 173.54))
+    lat_s = float(opts.get("lat_s", 21.98))
+    lat_n = float(opts.get("lat_n", 50.43))
     if lon_e <= lon_w or lat_n <= lat_s:
         raise ValueError("ひまわりモザイク: 緯度経度の範囲が不正です")
 
@@ -833,8 +884,8 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
 
     z = int(opts.get("bosai_map_zoom", opts.get("bosai_zoom", 4)))
-    lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 36.0)))
-    lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 138.0)))
+    lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 37.545)))
+    lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 145.415)))
     z = max(0, min(HIMI_JP_TILE_MAX_ZOOM, z))
     xtile, ytile = _deg2num(lat, lon, z)
 
@@ -1423,16 +1474,26 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 max_tiles = int(msc.get("bosai_himawari_mosaic_max_tiles", 400))
                 max_tiles = max(16, min(900, max_tiles))
                 bbox = msc.get("bosai_himawari_bbox")
-                if isinstance(bbox, dict):
-                    lon_w = float(bbox.get("lon_w", 104.0))
-                    lon_e = float(bbox.get("lon_e", 155.0))
-                    lat_s = float(bbox.get("lat_s", 21.0))
-                    lat_n = float(bbox.get("lat_n", 55.35))
+                like = msc.get("bosai_himawari_like_map")
+                if isinstance(like, dict) and like.get("enabled", False):
+                    z_lm = int(like.get("z", 5))
+                    lat_lm = float(like.get("lat", 37.545))
+                    lon_lm = float(like.get("lon", 145.415))
+                    vp_w = float(like.get("vp_w", 1280))
+                    vp_h = float(like.get("vp_h", 820))
+                    lon_w, lon_e, lat_s, lat_n = _himawari_bbox_from_map_viewport(
+                        z_lm, lat_lm, lon_lm, vp_w, vp_h
+                    )
+                elif isinstance(bbox, dict):
+                    lon_w = float(bbox.get("lon_w", 117.29))
+                    lon_e = float(bbox.get("lon_e", 173.54))
+                    lat_s = float(bbox.get("lat_s", 21.98))
+                    lat_n = float(bbox.get("lat_n", 50.43))
                 else:
-                    lon_w = float(msc.get("bosai_him_lon_w", 104.0))
-                    lon_e = float(msc.get("bosai_him_lon_e", 155.0))
-                    lat_s = float(msc.get("bosai_him_lat_s", 21.0))
-                    lat_n = float(msc.get("bosai_him_lat_n", 55.35))
+                    lon_w = float(msc.get("bosai_him_lon_w", 117.29))
+                    lon_e = float(msc.get("bosai_him_lon_e", 173.54))
+                    lat_s = float(msc.get("bosai_him_lat_s", 21.98))
+                    lat_n = float(msc.get("bosai_him_lat_n", 50.43))
 
                 if msc.get("bosai_himawari_single_tile"):
                     jpg_url, _hhmm, _slot_iso, slot_utc = (
@@ -1443,9 +1504,13 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 else:
                     bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
                     prod_band, prod_name, _ = _himawari_jp_band_products(str(band))
-                    z_fetch = int(
-                        msc.get("bosai_fetch_zoom", HIMI_JP_TILE_MAX_ZOOM)
-                    )
+                    if isinstance(like, dict) and like.get("enabled", False):
+                        z_lm = int(like.get("z", 5))
+                        z_fetch = int(like.get("fetch_zoom", z_lm))
+                    else:
+                        z_fetch = int(
+                            msc.get("bosai_fetch_zoom", HIMI_JP_TILE_MAX_ZOOM)
+                        )
                     z_fetch = max(3, min(HIMI_JP_TILE_MAX_ZOOM, z_fetch))
                     him_mosaic = {
                         "band": str(band),
@@ -1466,17 +1531,19 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                             msc.get("crop_mosaic_to_filled_tiles", True)
                         ),
                     }
-                    q = urllib.parse.urlencode(
-                        {
-                            "band": str(band),
-                            "bt": bt,
-                            "lw": f"{lon_w:.3f}",
-                            "le": f"{lon_e:.3f}",
-                            "ls": f"{lat_s:.3f}",
-                            "ln": f"{lat_n:.3f}",
-                            "zf": str(z_fetch),
-                        }
-                    )
+                    qd: dict[str, str] = {
+                        "band": str(band),
+                        "bt": bt,
+                        "lw": f"{lon_w:.3f}",
+                        "le": f"{lon_e:.3f}",
+                        "ls": f"{lat_s:.3f}",
+                        "ln": f"{lat_n:.3f}",
+                        "zf": str(z_fetch),
+                    }
+                    if isinstance(like, dict) and like.get("enabled", False):
+                        qd["lm"] = "1"
+                        qd["lz"] = str(int(like.get("z", 5)))
+                    q = urllib.parse.urlencode(qd)
                     jpg_url = f"{WXBRIEFING_HIMI_JP_MOSAIC}?{q}"
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"jma_msc_himawari_japan ({band}): {e}")
@@ -1524,9 +1591,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 "comment": (
                     "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
                     "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
-                    "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=color&contents=himawari 、"
-                    "赤外は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=ir&contents=himawari と同系のデータ。"
-                    "モザイクは bosai_himawari_bbox（既定: 104°E〜155°E・台湾南端−約100km〜樺太北端＋約80km）を Web Mercator タイルで結合。"
+                    "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#5/37.545/145.415/&elem=color&contents=himawari 、"
+                    "赤外は https://www.jma.go.jp/bosai/map.html#5/37.545/145.415/&elem=ir&contents=himawari と同系のデータ。"
+                    "モザイクは bosai_himawari_like_map（統合地図 #5/37.545/145.415 相当の画角）または bosai_himawari_bbox を Web Mercator タイルで結合。"
                     "取得できたタイルの外周だけを長方形に切り出し（crop_mosaic_to_filled_tiles）、余白は trim_mosaic_border で削る。"
                     "satimg は z=6 まで（それ以上は 404）。単タイルのみは bosai_himawari_single_tile: true。"
                     "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"
