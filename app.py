@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-62-himawari-mosaic-rect-crop"
+PORTAL_BUILD = "20260413-63-himawari-bbox-sakhalin-laos-jp-center"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -691,8 +691,7 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
     緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
 
-    樺太南端〜台湾・日本列島を収める用途では lon_w〜lon_e / lat_s〜lat_n を
-    config の bosai_himawari_bbox 等で指定する。
+    描画範囲は lon_w〜lon_e / lat_s〜lat_n（既定は樺太北端＋約80km〜ラオス付近・経度は日本を中心）。
     """
     from PIL import Image
 
@@ -708,10 +707,10 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         pb, pn, _ = _himawari_jp_band_products(band)
         prod_band, prod_name = pb, pn
 
-    lon_w = float(opts.get("lon_w", 118.0))
-    lon_e = float(opts.get("lon_e", 151.5))
-    lat_s = float(opts.get("lat_s", 21.0))
-    lat_n = float(opts.get("lat_n", 46.6))
+    lon_w = float(opts.get("lon_w", 121.0))
+    lon_e = float(opts.get("lon_e", 155.0))
+    lat_s = float(opts.get("lat_s", 16.65))
+    lat_n = float(opts.get("lat_n", 55.35))
     if lon_e <= lon_w or lat_n <= lat_s:
         raise ValueError("ひまわりモザイク: 緯度経度の範囲が不正です")
 
@@ -834,8 +833,8 @@ def msc_himawari_japan_jpg_url_for_ref_utc(
     bt, vt, slot_utc = _himawari_jp_select_slot(ref_utc)
 
     z = int(opts.get("bosai_map_zoom", opts.get("bosai_zoom", 4)))
-    lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 34.38)))
-    lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 141.592)))
+    lat = float(opts.get("bosai_map_lat", opts.get("bosai_lat", 36.0)))
+    lon = float(opts.get("bosai_map_lon", opts.get("bosai_lon", 138.0)))
     z = max(0, min(HIMI_JP_TILE_MAX_ZOOM, z))
     xtile, ytile = _deg2num(lat, lon, z)
 
@@ -1425,15 +1424,15 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 max_tiles = max(16, min(900, max_tiles))
                 bbox = msc.get("bosai_himawari_bbox")
                 if isinstance(bbox, dict):
-                    lon_w = float(bbox.get("lon_w", 118.0))
-                    lon_e = float(bbox.get("lon_e", 151.5))
-                    lat_s = float(bbox.get("lat_s", 21.0))
-                    lat_n = float(bbox.get("lat_n", 46.6))
+                    lon_w = float(bbox.get("lon_w", 121.0))
+                    lon_e = float(bbox.get("lon_e", 155.0))
+                    lat_s = float(bbox.get("lat_s", 16.65))
+                    lat_n = float(bbox.get("lat_n", 55.35))
                 else:
-                    lon_w = float(msc.get("bosai_him_lon_w", 118.0))
-                    lon_e = float(msc.get("bosai_him_lon_e", 151.5))
-                    lat_s = float(msc.get("bosai_him_lat_s", 21.0))
-                    lat_n = float(msc.get("bosai_him_lat_n", 46.6))
+                    lon_w = float(msc.get("bosai_him_lon_w", 121.0))
+                    lon_e = float(msc.get("bosai_him_lon_e", 155.0))
+                    lat_s = float(msc.get("bosai_him_lat_s", 16.65))
+                    lat_n = float(msc.get("bosai_him_lat_n", 55.35))
 
                 if msc.get("bosai_himawari_single_tile"):
                     jpg_url, _hhmm, _slot_iso, slot_utc = (
@@ -1515,9 +1514,9 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                 "comment": (
                     "気象庁防災「統合地図」ひまわり日本域に相当するタイル画像（"
                     "https://www.jma.go.jp/bosai/himawari/data/satimg/ ）。"
-                    "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=color&contents=himawari 、"
-                    "赤外は https://www.jma.go.jp/bosai/map.html#4/34.38/141.592/&elem=ir&contents=himawari と同系のデータ。"
-                    "モザイクは bosai_himawari_bbox（既定: 樺太南端〜台湾・日本域）を Web Mercator タイルで結合。"
+                    "ブラウザ表示の可視は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=color&contents=himawari 、"
+                    "赤外は https://www.jma.go.jp/bosai/map.html#4/36/138/&elem=ir&contents=himawari と同系のデータ。"
+                    "モザイクは bosai_himawari_bbox（既定: 樺太北端＋約80km〜ラオス付近・日本付近を緯度中央）を Web Mercator タイルで結合。"
                     "取得できたタイルの外周だけを長方形に切り出し（crop_mosaic_to_filled_tiles）、余白は trim_mosaic_border で削る。"
                     "satimg は z=6 まで（それ以上は 404）。単タイルのみは bosai_himawari_single_tile: true。"
                     "右下ロゴ等は控えめにトリミング（crop_logo_* で調整）。"

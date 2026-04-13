@@ -95,13 +95,13 @@
     "bosai_fetch_zoom": 6,
     "bosai_himawari_mosaic_max_tiles": 400,
     "bosai_himawari_bbox": {
-      "lon_w": 118.0,
-      "lon_e": 151.5,
-      "lat_s": 21.0,
-      "lat_n": 46.6
+      "lon_w": 121.0,
+      "lon_e": 155.0,
+      "lat_s": 16.65,
+      "lat_n": 55.35
     },
-    "bosai_map_lat": 34.38,
-    "bosai_map_lon": 141.592,
+    "bosai_map_lat": 36.0,
+    "bosai_map_lon": 138.0,
     "crop_logo_right": 108,
     "crop_logo_bottom": 44,
     "print_dpi": 300,
