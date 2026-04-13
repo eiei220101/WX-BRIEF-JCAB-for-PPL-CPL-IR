@@ -117,8 +117,8 @@ def _inject_wx_streamlit_ui_styles() -> None:
 
 
 def _wx_build_display() -> str:
-    """Streamlit Cloud が古い app.py のときも落ちない（portal_build_stamp 未実装なら PORTAL_BUILD のみ）。"""
-    fn = getattr(wx, "portal_build_stamp", None)
+    """キャプション用の短いビルド行（PORTAL_BUILD | app.py UTC）。古い app.py では PORTAL_BUILD のみ。"""
+    fn = getattr(wx, "portal_build_short_stamp", None)
     if callable(fn):
         try:
             return str(fn())
@@ -542,11 +542,7 @@ def main() -> None:
     cfg = _cfg_cached()
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
-    st.caption(
-        f"ビルド: {_wx_build_display()} · Streamlit 版"
-        " — 手動ラベル（`PORTAL_BUILD`）・（最新の **app.py** では）**app.py の最終更新（UTC）**・（リポジトリ内なら）**git の短いコミット**。"
-        " 更新時刻が直近の保存と一致すれば、このアプリが読み込んでいる **app.py** は新しいです。"
-    )
+    st.caption(f"ビルド: {_wx_build_display()}　15期　Ishikawa")
 
     with st.sidebar:
         ha = cfg.get("http_auth")

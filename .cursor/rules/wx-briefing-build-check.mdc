@@ -7,6 +7,6 @@ alwaysApply: true
 # 最新ビルド（PORTAL_BUILD / portal_build_stamp）
 
 - **手動リリースラベル**は `app.py` の **`PORTAL_BUILD = "…"`**。会話や記憶ではなく、**いまのファイルを読んだ値**を伝える。
-- 画面・HTTP ヘッダでは **`portal_build_stamp()`**（`PORTAL_BUILD` + **`app.py` の mtime（UTC）** + 利用可能なら **git 短コミット**）が使われる。Streamlit の **`ビルド: … · Streamlit 版`** はこのスタンプ。
+- 画面・HTTP ヘッダでは **`portal_build_stamp()`**（`PORTAL_BUILD` + **`app.py` の mtime（UTC）** + 利用可能なら **git 短コミット**）。Streamlit タイトル下の短いキャプションは **`portal_build_short_stamp()`**（git なし）+ 固定サフィックス。
 - **「いま動いているコード」**の切り分けは、表示の **app.py 更新時刻**がローカル保存と一致するか、および **`app.py` の絶対パス**（ポータル HTML の build-strip）で行う。
 - ユーザーが「最新か」「ビルドは？」と聞いたら、上記を短く案内し、必要なら `PORTAL_BUILD` 行と `portal_build_stamp()` の意味を説明する。

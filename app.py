@@ -105,6 +105,19 @@ def portal_build_stamp() -> str:
     if g:
         parts.append(f"git {g}")
     return " | ".join(parts)
+
+
+def portal_build_short_stamp() -> str:
+    """Streamlit キャプション用: ``PORTAL_BUILD`` と ``app.py`` の更新時刻（UTC）のみ（git なし）。"""
+    try:
+        m = _PORTAL_APP_PATH.stat().st_mtime
+    except OSError:
+        mtime_s = "?"
+    else:
+        mtime_s = datetime.fromtimestamp(m, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    return f"{PORTAL_BUILD} | app.py {mtime_s}"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
