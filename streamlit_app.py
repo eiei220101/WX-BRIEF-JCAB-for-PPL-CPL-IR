@@ -58,11 +58,11 @@ def _region_title_heading(title: str) -> None:
     )
 
 
-def _region_select_all_footer(sel_key: str, target_keys: list[str]) -> None:
-    """選択肢の末尾に「すべての項目を選択する」。コンテナ key は sel_key ごとに一意。"""
+def _region_select_all_header(sel_key: str, target_keys: list[str]) -> None:
+    """見出しの直後に「すべての項目を選択する」。コンテナ key は sel_key ごとに一意。"""
     _sync_select_all_from_children(sel_key, target_keys)
     row_key = re.sub(r"[^0-9a-zA-Z_\-]", "_", sel_key).strip("_") or "selall"
-    with st.container(key=f"wx_selall_footer_{row_key}"):
+    with st.container(key=f"wx_selall_header_{row_key}"):
         st.checkbox(
             "すべての項目を選択する",
             key=sel_key,
@@ -120,7 +120,7 @@ def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
 
 
 def _inject_wx_streamlit_ui_styles() -> None:
-    """METAR 枠＝青・天気図枠＝赤（枠線のみ。中身は既定背景のまま）、METAR/TAF 生成ボタン＝青。"""
+    """METAR 枠＝青枠線＋枠内チェックオン時も青。天気図枠＝赤枠線・チェックはテーマ既定（赤系）。生成ボタン＝青。"""
     st.markdown(
         """
         <style>
@@ -153,20 +153,18 @@ def _inject_wx_streamlit_ui_styles() -> None:
           [class*="st-key-mt_go"] button:focus-visible {
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35) !important;
           }
-          /* 「すべての項目」フッター行のチェック位置 */
-          [class*="st-key-wx_selall_footer_"] [data-testid="stCheckbox"] [data-baseweb="checkbox"] {
+          /* 「すべての項目」先頭行のチェック位置 */
+          [class*="st-key-wx_selall_header_"] [data-testid="stCheckbox"] [data-baseweb="checkbox"] {
             align-items: center !important;
           }
-          [class*="st-key-wx_selall_footer_"]
+          [class*="st-key-wx_selall_header_"]
             [data-testid="stCheckbox"]
             [data-baseweb="checkbox"]
             > span:first-of-type {
             margin-top: 0 !important;
           }
-          /* METAR/TAF 枠・天気図枠内のチェック（空港・種別・すべての項目含む）オン時を青 */
+          /* METAR/TAF 枠内のみチェックオン時を青（各種天気図枠は既定の赤系のまま） */
           .st-key-wx_metar_taf_frame [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
-            > span:first-of-type,
-          .st-key-wx_charts_frame [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
             > span:first-of-type {
             background-color: #2563eb !important;
             border-left-color: #2563eb !important;
@@ -268,19 +266,33 @@ def _render_metar_taf(cfg: dict) -> None:
         )
         with st.container(border=True):
             _region_title_heading(title)
-            cols = st.columns(3)
-            for i, ap in enumerate(aps):
-                icao = ap["icao"]
-                lab = ap["label"]
-                with cols[i % 3]:
+            if _mt_keys is not None:
+                _region_select_all_header("mt_selall_tohoku_kanto", _mt_keys)
+                st.markdown(
+                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                    unsafe_allow_html=True,
+                )
+                for ap in aps:
+                    icao = ap["icao"]
+                    lab = ap["label"]
                     if st.checkbox(
                         f"{lab} ({icao})",
                         value=False,
                         key=f"mt_ap_{icao}",
                     ):
                         selected.append(icao)
-            if _mt_keys is not None:
-                _region_select_all_footer("mt_selall_tohoku_kanto", _mt_keys)
+            else:
+                cols = st.columns(3)
+                for i, ap in enumerate(aps):
+                    icao = ap["icao"]
+                    lab = ap["label"]
+                    with cols[i % 3]:
+                        if st.checkbox(
+                            f"{lab} ({icao})",
+                            value=False,
+                            key=f"mt_ap_{icao}",
+                        ):
+                            selected.append(icao)
     c1, c2 = st.columns(2)
     with c1:
         want_met = st.checkbox("METAR", value=False, key="mt_met")
@@ -351,21 +363,34 @@ def _render_charts_zip(cfg: dict) -> None:
                 )
                 with st.container(border=True):
                     _region_title_heading(title)
-                    cols = st.columns(3)
-                    for i, pr in enumerate(plist):
-                        icao = str(pr.get("icao")).strip().upper()
-                        lab = str(pr.get("label") or pr.get("name") or icao).strip()
-                        with cols[i % 3]:
+                    if _taf_keys is not None:
+                        _region_select_all_header(
+                            "merge_taf_selall_tohoku_kanto",
+                            _taf_keys,
+                        )
+                        st.markdown(
+                            '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                            unsafe_allow_html=True,
+                        )
+                        for pr in plist:
+                            icao = str(pr.get("icao")).strip().upper()
+                            lab = str(pr.get("label") or pr.get("name") or icao).strip()
                             st.checkbox(
                                 f"{lab}（{icao}）",
                                 value=False,
                                 key=f"merge_taf_ap_{icao}",
                             )
-                    if _taf_keys is not None:
-                        _region_select_all_footer(
-                            "merge_taf_selall_tohoku_kanto",
-                            _taf_keys,
-                        )
+                    else:
+                        cols = st.columns(3)
+                        for i, pr in enumerate(plist):
+                            icao = str(pr.get("icao")).strip().upper()
+                            lab = str(pr.get("label") or pr.get("name") or icao).strip()
+                            with cols[i % 3]:
+                                st.checkbox(
+                                    f"{lab}（{icao}）",
+                                    value=False,
+                                    key=f"merge_taf_ap_{icao}",
+                                )
             pc1, pc2 = st.columns(2)
             with pc1:
                 st.checkbox("PART1（QMCD98_）", value=False, key="merge_taf_p1")
@@ -424,20 +449,32 @@ def _render_charts_zip(cfg: dict) -> None:
                 )
                 with st.container(border=True):
                     _region_title_heading(title)
-                    dc = st.columns(4)
-                    for i, dr in enumerate(dlist):
-                        fk = dr["fig_key"]
-                        with dc[i % 4]:
+                    if _ds_keys is not None:
+                        _region_select_all_header(
+                            "merge_dsig_selall_tohoku_kanto",
+                            _ds_keys,
+                        )
+                        st.markdown(
+                            '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                            unsafe_allow_html=True,
+                        )
+                        for dr in dlist:
+                            fk = dr["fig_key"]
                             st.checkbox(
                                 str(dr["label"]).strip(),
                                 value=False,
                                 key=f"merge_dsig_{fk}",
                             )
-                    if _ds_keys is not None:
-                        _region_select_all_footer(
-                            "merge_dsig_selall_tohoku_kanto",
-                            _ds_keys,
-                        )
+                    else:
+                        dc = st.columns(4)
+                        for i, dr in enumerate(dlist):
+                            fk = dr["fig_key"]
+                            with dc[i % 4]:
+                                st.checkbox(
+                                    str(dr["label"]).strip(),
+                                    value=False,
+                                    key=f"merge_dsig_{fk}",
+                                )
         st.divider()
 
     c1, c2 = st.columns(2)
