@@ -50,47 +50,24 @@ def _sync_select_all_from_children(sel_key: str, target_keys: list[str]) -> None
     st.session_state[sel_key] = all_on
 
 
-def _columns_region_title_and_select_all():
-    """見出し＋手動スペース（左）と「すべて…」チェック（右）。列間は詰め、縦は中央。"""
-    weights = [2.28, 9.72]
-    for kwargs in (
-        {"gap": None, "vertical_alignment": "center"},
-        {"gap": "xxsmall", "vertical_alignment": "center"},
-        {"gap": "xsmall", "vertical_alignment": "center"},
-        {"vertical_alignment": "center"},
-        {"gap": None},
-        {},
-    ):
-        try:
-            return st.columns(weights, **kwargs)
-        except TypeError:
-            continue
-    return st.columns(weights)
+def _region_title_heading(title: str) -> None:
+    """地域ブロック先頭の見出し（HTML エスケープ済み）。"""
+    st.markdown(
+        f'<p style="margin:0 0 0.35rem 0;"><strong>{html.escape(title)}</strong></p>',
+        unsafe_allow_html=True,
+    )
 
 
-def _region_title_and_select_all_row(
-    title: str, sel_key: str, target_keys: list[str]
-) -> None:
-    """「東北・関東」＋短い空白＋□すべて… を1行に近づけ、チェック行と高さを揃える。"""
+def _region_select_all_footer(sel_key: str, target_keys: list[str]) -> None:
+    """選択肢の末尾に「すべての項目を選択する」。コンテナ key は sel_key ごとに一意。"""
     _sync_select_all_from_children(sel_key, target_keys)
-    title_e = html.escape(title)
-    with st.container(key="wx_region_selall_row"):
-        c_left, c_right = _columns_region_title_and_select_all()
-        with c_left:
-            st.markdown(
-                '<p style="margin:0;padding:0;font-size:1rem;line-height:1.35;'
-                'display:flex;align-items:center;min-height:2.75rem;">'
-                f"<strong>{title_e}</strong>"
-                '<span style="white-space:pre" aria-hidden="true">&nbsp;&nbsp;</span>'
-                "</p>",
-                unsafe_allow_html=True,
-            )
-        with c_right:
-            st.checkbox(
-                "すべての項目を選択する",
-                key=sel_key,
-                on_change=_group_select_all_callback(sel_key, target_keys),
-            )
+    row_key = re.sub(r"[^0-9a-zA-Z_\-]", "_", sel_key).strip("_") or "selall"
+    with st.container(key=f"wx_selall_footer_{row_key}"):
+        st.checkbox(
+            "すべての項目を選択する",
+            key=sel_key,
+            on_change=_group_select_all_callback(sel_key, target_keys),
+        )
 
 
 def _norm_sigwx_area(area: str) -> str:
@@ -176,20 +153,20 @@ def _inject_wx_streamlit_ui_styles() -> None:
           [class*="st-key-mt_go"] button:focus-visible {
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35) !important;
           }
-          /* 東北・関東 行: チェックボックスを見出し行の縦中央に */
-          div[class*="st-key-wx_region_selall_row"] [data-testid="stCheckbox"] [data-baseweb="checkbox"] {
+          /* 「すべての項目」フッター行のチェック位置 */
+          [class*="st-key-wx_selall_footer_"] [data-testid="stCheckbox"] [data-baseweb="checkbox"] {
             align-items: center !important;
           }
-          div[class*="st-key-wx_region_selall_row"]
+          [class*="st-key-wx_selall_footer_"]
             [data-testid="stCheckbox"]
             [data-baseweb="checkbox"]
             > span:first-of-type {
             margin-top: 0 !important;
           }
-          /* METAR / TAF 種別チェック: オン時のチェックマークを青系に */
-          .st-key-wx_mt_met_wrap [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
+          /* METAR/TAF 枠・天気図枠内のチェック（空港・種別・すべての項目含む）オン時を青 */
+          .st-key-wx_metar_taf_frame [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
             > span:first-of-type,
-          .st-key-wx_mt_taf_wrap [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
+          .st-key-wx_charts_frame [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
             > span:first-of-type {
             background-color: #2563eb !important;
             border-left-color: #2563eb !important;
@@ -284,14 +261,13 @@ def _render_metar_taf(cfg: dict) -> None:
     for title, aps in wx.group_metar_taf_airports_by_region(airports):
         if not aps:
             continue
+        _mt_keys = (
+            [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
+            if title == TOHOKU_KANTO_UI_TITLE
+            else None
+        )
         with st.container(border=True):
-            if title == TOHOKU_KANTO_UI_TITLE:
-                _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
-                _region_title_and_select_all_row(
-                    title, "mt_selall_tohoku_kanto", _mt_keys
-                )
-            else:
-                st.markdown(f"**{title}**")
+            _region_title_heading(title)
             cols = st.columns(3)
             for i, ap in enumerate(aps):
                 icao = ap["icao"]
@@ -303,13 +279,13 @@ def _render_metar_taf(cfg: dict) -> None:
                         key=f"mt_ap_{icao}",
                     ):
                         selected.append(icao)
+            if _mt_keys is not None:
+                _region_select_all_footer("mt_selall_tohoku_kanto", _mt_keys)
     c1, c2 = st.columns(2)
     with c1:
-        with st.container(key="wx_mt_met_wrap"):
-            want_met = st.checkbox("METAR", value=False, key="mt_met")
+        want_met = st.checkbox("METAR", value=False, key="mt_met")
     with c2:
-        with st.container(key="wx_mt_taf_wrap"):
-            want_taf = st.checkbox("TAF", value=False, key="mt_taf")
+        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
     if st.button("METAR/TAF PDF を生成", type="secondary", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
@@ -365,19 +341,16 @@ def _render_charts_zip(cfg: dict) -> None:
             for title, plist in blocks:
                 if not plist:
                     continue
+                _taf_keys = (
+                    [
+                        f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                        for pr in plist
+                    ]
+                    if title == TOHOKU_KANTO_UI_TITLE
+                    else None
+                )
                 with st.container(border=True):
-                    if title == TOHOKU_KANTO_UI_TITLE:
-                        _taf_keys = [
-                            f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
-                            for pr in plist
-                        ]
-                        _region_title_and_select_all_row(
-                            title,
-                            "merge_taf_selall_tohoku_kanto",
-                            _taf_keys,
-                        )
-                    else:
-                        st.markdown(f"**{title}**")
+                    _region_title_heading(title)
                     cols = st.columns(3)
                     for i, pr in enumerate(plist):
                         icao = str(pr.get("icao")).strip().upper()
@@ -388,6 +361,11 @@ def _render_charts_zip(cfg: dict) -> None:
                                 value=False,
                                 key=f"merge_taf_ap_{icao}",
                             )
+                    if _taf_keys is not None:
+                        _region_select_all_footer(
+                            "merge_taf_selall_tohoku_kanto",
+                            _taf_keys,
+                        )
             pc1, pc2 = st.columns(2)
             with pc1:
                 st.checkbox("PART1（QMCD98_）", value=False, key="merge_taf_p1")
@@ -439,16 +417,13 @@ def _render_charts_zip(cfg: dict) -> None:
             for title, dlist in dblocks:
                 if not dlist:
                     continue
+                _ds_keys = (
+                    [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                    if title == TOHOKU_KANTO_UI_TITLE
+                    else None
+                )
                 with st.container(border=True):
-                    if title == TOHOKU_KANTO_UI_TITLE:
-                        _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
-                        _region_title_and_select_all_row(
-                            title,
-                            "merge_dsig_selall_tohoku_kanto",
-                            _ds_keys,
-                        )
-                    else:
-                        st.markdown(f"**{title}**")
+                    _region_title_heading(title)
                     dc = st.columns(4)
                     for i, dr in enumerate(dlist):
                         fk = dr["fig_key"]
@@ -458,6 +433,11 @@ def _render_charts_zip(cfg: dict) -> None:
                                 value=False,
                                 key=f"merge_dsig_{fk}",
                             )
+                    if _ds_keys is not None:
+                        _region_select_all_footer(
+                            "merge_dsig_selall_tohoku_kanto",
+                            _ds_keys,
+                        )
         st.divider()
 
     c1, c2 = st.columns(2)
