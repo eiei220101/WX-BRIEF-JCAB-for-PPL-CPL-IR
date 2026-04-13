@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-74-config-url-visible-35657-14313"
+PORTAL_BUILD = "20260414-75-streamlit-taf-merge-select"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -382,21 +382,29 @@ def jma_airinfo_taf_part_png_url(icao: str, part: int) -> str:
 
 
 def build_airinfo_taf_merged_pdf_bytes(item: dict, timeout: int = 90) -> bytes:
-    """PART1・PART2 の PNG を取得し、連続 2 ページの 1 本 PDF にする。"""
+    """飛行場時系列予報: PART1 / PART2 の PNG を取得し、1 本の PDF に連結（選択は item のフラグ）。"""
     from pypdf import PdfReader, PdfWriter
 
     icao = str(item.get("taf_icao") or "").strip()
     if not icao:
         raise ValueError("飛行場時系列予報: taf_icao（ICAO）がありません")
+    inc1 = bool(item.get("taf_include_part1", True))
+    inc2 = bool(item.get("taf_include_part2", True))
+    if not inc1 and not inc2:
+        raise ValueError("飛行場時系列予報: PART1 / PART2 のいずれかにチェックが必要です")
     res = float(item.get("taf_image_pdf_resolution") or 120)
     res = min(300.0, max(72.0, res))
-    b1, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 1), timeout=timeout)
-    b2, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 2), timeout=timeout)
-    pdf1 = _image_bytes_to_single_page_pdf(b1, resolution=res)
-    pdf2 = _image_bytes_to_single_page_pdf(b2, resolution=res)
     writer = PdfWriter()
-    for blob in (pdf1, pdf2):
-        reader = PdfReader(io.BytesIO(blob))
+    blobs: list[bytes] = []
+    if inc1:
+        b1, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 1), timeout=timeout)
+        blobs.append(b1)
+    if inc2:
+        b2, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 2), timeout=timeout)
+        blobs.append(b2)
+    for raw in blobs:
+        pdf_one = _image_bytes_to_single_page_pdf(raw, resolution=res)
+        reader = PdfReader(io.BytesIO(pdf_one))
         if len(reader.pages) == 0:
             raise ValueError("飛行場時系列予報: 中間 PDF にページがありません")
         writer.add_page(reader.pages[0])
@@ -1731,13 +1739,32 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
     return data, ctype
 
 
-def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
+def expand_download_items(
+    cfg: dict,
+    *,
+    merged_taf_selection: dict | None = None,
+) -> tuple[list[dict], list[str]]:
     """
     config の items に加え、jma_weather_map が有効なら気象庁 bosai の list.json から
     実況・予想のURLを組み立てる。warnings は ZIP とは別に HTTP ヘッダ用。
+
+    merged_taf_selection: 結合 PDF 用。``{"icaos": ["RJSF", ...], "part1": true, "part2": true}`` のとき、
+    飛行場時系列予報は該当 ICAO のみ・PART フラグを item に載せる。None で従来どおり全件・PART1+2。
     """
     out: list[dict] = []
     warnings: list[str] = []
+    taf_allow: set[str] | None = None
+    taf_part1 = taf_part2 = True
+    if isinstance(merged_taf_selection, dict):
+        raw_icaos = merged_taf_selection.get("icaos")
+        if isinstance(raw_icaos, (list, tuple, set)):
+            taf_allow = {
+                re.sub(r"[^A-Za-z0-9]", "", str(x)).upper()
+                for x in raw_icaos
+                if str(x).strip()
+            }
+        taf_part1 = bool(merged_taf_selection.get("part1", True))
+        taf_part2 = bool(merged_taf_selection.get("part2", True))
     for it in cfg.get("items") or []:
         if isinstance(it, dict):
             out.append(it)
@@ -2203,25 +2230,50 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
             if not icao:
                 warnings.append("jma_airinfo_taf: ICAO なしの行をスキップしました")
                 continue
+            code = re.sub(r"[^A-Za-z0-9]", "", str(icao)).upper()
+            if taf_allow is not None and code not in taf_allow:
+                continue
             try:
                 jma_airinfo_taf_part_png_url(str(icao), 1)
                 jma_airinfo_taf_part_png_url(str(icao), 2)
             except ValueError as e:
                 warnings.append(f"jma_airinfo_taf ({icao}): {e}")
                 continue
-            code = re.sub(r"[^A-Za-z0-9]", "", str(icao)).upper()
+            if not taf_part1 and not taf_part2:
+                continue
             dpi = float(pr.get("image_pdf_resolution") or dpi_block)
+            base_fn = fn or f"TAF_{code}_PART1-2.pdf"
+            ext = Path(base_fn).suffix or ".pdf"
+            lab_short = (label or code).replace(" ", "").replace("　", "")
+            if isinstance(merged_taf_selection, dict):
+                if taf_part1 and taf_part2:
+                    part_suffix = "PART1-2"
+                    part_desc = "PART1（QMCD98_）の次に PART2（QMCJ98_）を 1 本の PDF（2 ページ）に連結。"
+                elif taf_part1:
+                    part_suffix = "PART1"
+                    part_desc = "PART1（QMCD98_）のみ 1 ページの PDF。"
+                else:
+                    part_suffix = "PART2"
+                    part_desc = "PART2（QMCJ98_）のみ 1 ページの PDF。"
+                out_fn = f"飛行場時系列予報_{lab_short}_{code}_{part_suffix}{ext}"
+            else:
+                out_fn = base_fn
+                part_desc = (
+                    "PART1（QMCD98_）の次に PART2（QMCJ98_）の PNG を 1 本の PDF（2 ページ）に連結。"
+                )
             out.append(
                 {
-                    "filename": fn or f"TAF_{code}_PART1-2.pdf",
+                    "filename": out_fn,
                     "url": WXBRIEFING_AIRINFO_TAF_MERGED,
                     "taf_icao": code,
+                    "taf_include_part1": taf_part1,
+                    "taf_include_part2": taf_part2,
                     "taf_image_pdf_resolution": dpi,
                     "comment": (
                         "気象庁 航空気象情報「飛行場時系列予報・飛行場時系列情報」（awfo_taf.html）。"
                         f"ICAO **{code}**"
                         + (f"（{label}）" if label else "")
-                        + "。PART1（QMCD98_）の次に PART2（QMCJ98_）の PNG を 1 本の PDF（2 ページ）に連結。"
+                        + f"。{part_desc}"
                     ),
                 }
             )
@@ -2564,11 +2616,17 @@ def _image_bytes_to_single_page_pdf_a4(
     return out.getvalue()
 
 
-def build_merged_pdf(cfg: dict) -> tuple[bytes, list[str], list[str], int]:
+def build_merged_pdf(
+    cfg: dict,
+    *,
+    merged_taf_selection: dict | None = None,
+) -> tuple[bytes, list[str], list[str], int]:
     """
     取得対象をすべて取得し、1つの PDF に連結する。
     PDF はページとして追加、PNG/JPEG/GIF は1枚1ページの PDF にしてから追加。
     未対応形式（SVG 等）はスキップして warnings に記録。
+
+    merged_taf_selection: Streamlit 等から飛行場時系列予報の ICAO / PART を絞るときに指定。
     """
     try:
         from pypdf import PdfReader, PdfWriter
@@ -2581,7 +2639,9 @@ def build_merged_pdf(cfg: dict) -> tuple[bytes, list[str], list[str], int]:
 
     errors: list[str] = []
     warnings: list[str] = []
-    items, jma_warnings = expand_download_items(cfg)
+    items, jma_warnings = expand_download_items(
+        cfg, merged_taf_selection=merged_taf_selection
+    )
     warnings.extend(jma_warnings)
 
     writer = PdfWriter()

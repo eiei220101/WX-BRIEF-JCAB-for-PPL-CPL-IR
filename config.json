@@ -84,9 +84,13 @@
     "enabled": true,
     "image_pdf_resolution": 120,
     "products": [
-      { "icao": "RJSF", "filename": "飛行場時系列予報_福島空港_PART1-2.pdf" },
-      { "icao": "RJSS", "filename": "飛行場時系列予報_仙台空港_PART1-2.pdf" },
-      { "icao": "RJSN", "filename": "飛行場時系列予報_新潟空港_PART1-2.pdf" }
+      { "icao": "RJSF", "label": "福島空港", "filename": "飛行場時系列予報_福島空港_PART1-2.pdf" },
+      { "icao": "RJSS", "label": "仙台空港", "filename": "飛行場時系列予報_仙台空港_PART1-2.pdf" },
+      { "icao": "RJSN", "label": "新潟空港", "filename": "飛行場時系列予報_新潟空港_PART1-2.pdf" },
+      { "icao": "RJSC", "label": "山形空港", "filename": "飛行場時系列予報_山形空港_PART1-2.pdf" },
+      { "icao": "RJSI", "label": "花巻空港", "filename": "飛行場時系列予報_花巻空港_PART1-2.pdf" },
+      { "icao": "RJSY", "label": "庄内空港", "filename": "飛行場時系列予報_庄内空港_PART1-2.pdf" },
+      { "icao": "RJSK", "label": "秋田空港", "filename": "飛行場時系列予報_秋田空港_PART1-2.pdf" }
     ]
   },
   "jma_msc_himawari_japan": {

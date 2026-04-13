@@ -139,23 +139,88 @@ def _render_metar_taf(cfg: dict) -> None:
 
 def _render_charts_zip(cfg: dict) -> None:
     st.subheader("各種天気図・予報図")
+    taf = cfg.get("jma_airinfo_taf")
+    if isinstance(taf, dict) and taf.get("enabled"):
+        st.markdown("**飛行場時系列予報**（結合 PDF に含める範囲）")
+        st.caption(
+            "空港と PART1 / PART2 を選び、下の「結合 PDF を生成」に反映されます（全空港・PART1+2 のときは従来と同じ扱い）。"
+        )
+        prows = [
+            p
+            for p in (taf.get("products") or [])
+            if isinstance(p, dict) and str(p.get("icao") or "").strip()
+        ]
+        if not prows:
+            st.info("config の `jma_airinfo_taf.products` に ICAO を追加してください。")
+        else:
+            cols = st.columns(3)
+            for i, pr in enumerate(prows):
+                icao = str(pr.get("icao")).strip().upper()
+                lab = str(pr.get("label") or pr.get("name") or icao).strip()
+                with cols[i % 3]:
+                    st.checkbox(f"{lab}（{icao}）", value=True, key=f"merge_taf_ap_{icao}")
+            pc1, pc2 = st.columns(2)
+            with pc1:
+                st.checkbox("PART1（QMCD98_）", value=True, key="merge_taf_p1")
+            with pc2:
+                st.checkbox("PART2（QMCJ98_）", value=True, key="merge_taf_p2")
+        st.divider()
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
             errs: list[str] = []
             warns: list[str] = []
             data, pages = b"", 0
-            with st.spinner("取得・結合中（時間がかかることがあります）…"):
-                try:
-                    data, errs, warns, pages = wx.build_merged_pdf(cfg)
-                except RuntimeError as e:
-                    st.error(str(e))
-                except Exception as e:  # noqa: BLE001
-                    st.error(str(e))
-            st.session_state["_merged_pdf"] = data
-            st.session_state["_merged_pages"] = pages
-            st.session_state["_merged_errs"] = errs
-            st.session_state["_merged_warns"] = warns
+            merged_taf: dict | None = None
+            skip_merge = False
+            taf2 = cfg.get("jma_airinfo_taf")
+            if isinstance(taf2, dict) and taf2.get("enabled"):
+                prows2 = [
+                    p
+                    for p in (taf2.get("products") or [])
+                    if isinstance(p, dict) and str(p.get("icao") or "").strip()
+                ]
+                if prows2:
+                    all_icaos = [str(p.get("icao")).strip().upper() for p in prows2]
+                    sel = [
+                        icao
+                        for icao in all_icaos
+                        if st.session_state.get(f"merge_taf_ap_{icao}", True)
+                    ]
+                    p1 = bool(st.session_state.get("merge_taf_p1", True))
+                    p2 = bool(st.session_state.get("merge_taf_p2", True))
+                    if not sel:
+                        st.warning(
+                            "飛行場時系列予報: 空港を1つ以上選んでください。"
+                        )
+                        skip_merge = True
+                    elif not p1 and not p2:
+                        st.warning(
+                            "飛行場時系列予報: PART1 と PART2 のどちらかにチェックを入れてください。"
+                        )
+                        skip_merge = True
+                    elif not (
+                        set(sel) == set(all_icaos)
+                        and len(sel) == len(all_icaos)
+                        and p1
+                        and p2
+                    ):
+                        merged_taf = {"icaos": sel, "part1": p1, "part2": p2}
+            if not skip_merge:
+                with st.spinner("取得・結合中（時間がかかることがあります）…"):
+                    try:
+                        data, errs, warns, pages = wx.build_merged_pdf(
+                            cfg, merged_taf_selection=merged_taf
+                        )
+                    except RuntimeError as e:
+                        st.error(str(e))
+                    except Exception as e:  # noqa: BLE001
+                        st.error(str(e))
+                st.session_state["_merged_pdf"] = data
+                st.session_state["_merged_pages"] = pages
+                st.session_state["_merged_errs"] = errs
+                st.session_state["_merged_warns"] = warns
     with c2:
         if st.button("ZIP を生成", key="btn_zip"):
             with st.spinner("ZIP 作成中…"):
