@@ -50,13 +50,15 @@ def _sync_select_all_from_children(sel_key: str, target_keys: list[str]) -> None
     st.session_state[sel_key] = all_on
 
 
-def _columns_region_title_gap_checkbox():
-    """見出し・約3スペース・チェックの3列。縦位置は可能なら中央揃え。"""
-    weights = [2.15, 0.22, 9.6]
+def _columns_region_title_and_select_all():
+    """見出し＋手動スペース（左）と「すべて…」チェック（右）。列間は詰め、縦は中央。"""
+    weights = [2.28, 9.72]
     for kwargs in (
-        {"gap": "small", "vertical_alignment": "center"},
+        {"gap": None, "vertical_alignment": "center"},
+        {"gap": "xxsmall", "vertical_alignment": "center"},
+        {"gap": "xsmall", "vertical_alignment": "center"},
         {"vertical_alignment": "center"},
-        {"gap": "small"},
+        {"gap": None},
         {},
     ):
         try:
@@ -69,29 +71,26 @@ def _columns_region_title_gap_checkbox():
 def _region_title_and_select_all_row(
     title: str, sel_key: str, target_keys: list[str]
 ) -> None:
-    """「東北・関東」＋スペース3個分＋□すべて… を一文に近い1行で揃える。"""
+    """「東北・関東」＋短い空白＋□すべて… を1行に近づけ、チェック行と高さを揃える。"""
     _sync_select_all_from_children(sel_key, target_keys)
     title_e = html.escape(title)
-    c_t, c_g, c_c = _columns_region_title_gap_checkbox()
-    line_h = "2.5rem"
-    with c_t:
-        st.markdown(
-            f'<p style="margin:0;padding:0;font-size:1rem;line-height:{line_h};">'
-            f"<strong>{title_e}</strong></p>",
-            unsafe_allow_html=True,
-        )
-    with c_g:
-        st.markdown(
-            f'<p style="margin:0;padding:0;font-size:1rem;line-height:{line_h};">'
-            "&nbsp;&nbsp;&nbsp;</p>",
-            unsafe_allow_html=True,
-        )
-    with c_c:
-        st.checkbox(
-            "すべての項目を選択する",
-            key=sel_key,
-            on_change=_group_select_all_callback(sel_key, target_keys),
-        )
+    with st.container(key="wx_region_selall_row"):
+        c_left, c_right = _columns_region_title_and_select_all()
+        with c_left:
+            st.markdown(
+                '<p style="margin:0;padding:0;font-size:1rem;line-height:1.35;'
+                'display:flex;align-items:center;min-height:2.75rem;">'
+                f"<strong>{title_e}</strong>"
+                '<span style="white-space:pre" aria-hidden="true">&nbsp;&nbsp;</span>'
+                "</p>",
+                unsafe_allow_html=True,
+            )
+        with c_right:
+            st.checkbox(
+                "すべての項目を選択する",
+                key=sel_key,
+                on_change=_group_select_all_callback(sel_key, target_keys),
+            )
 
 
 def _norm_sigwx_area(area: str) -> str:
@@ -176,6 +175,27 @@ def _inject_wx_streamlit_ui_styles() -> None:
           }
           [class*="st-key-mt_go"] button:focus-visible {
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.35) !important;
+          }
+          /* 東北・関東 行: チェックボックスを見出し行の縦中央に */
+          div[class*="st-key-wx_region_selall_row"] [data-testid="stCheckbox"] [data-baseweb="checkbox"] {
+            align-items: center !important;
+          }
+          div[class*="st-key-wx_region_selall_row"]
+            [data-testid="stCheckbox"]
+            [data-baseweb="checkbox"]
+            > span:first-of-type {
+            margin-top: 0 !important;
+          }
+          /* METAR / TAF 種別チェック: オン時のチェックマークを青系に */
+          .st-key-wx_mt_met_wrap [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
+            > span:first-of-type,
+          .st-key-wx_mt_taf_wrap [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
+            > span:first-of-type {
+            background-color: #2563eb !important;
+            border-left-color: #2563eb !important;
+            border-right-color: #2563eb !important;
+            border-top-color: #2563eb !important;
+            border-bottom-color: #2563eb !important;
           }
         </style>
         """,
@@ -285,9 +305,11 @@ def _render_metar_taf(cfg: dict) -> None:
                         selected.append(icao)
     c1, c2 = st.columns(2)
     with c1:
-        want_met = st.checkbox("METAR", value=False, key="mt_met")
+        with st.container(key="wx_mt_met_wrap"):
+            want_met = st.checkbox("METAR", value=False, key="mt_met")
     with c2:
-        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
+        with st.container(key="wx_mt_taf_wrap"):
+            want_taf = st.checkbox("TAF", value=False, key="mt_taf")
     if st.button("METAR/TAF PDF を生成", type="secondary", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
