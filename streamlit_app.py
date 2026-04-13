@@ -11,6 +11,7 @@ Streamlit 版 WX Briefing（app.py のロジックを再利用）。
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,55 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import app as wx  # noqa: E402
+
+
+def _norm_sigwx_area(area: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(area).lower())
+
+
+def _sigwx_product_rows(sig: dict) -> list[dict]:
+    """結合 PDF 用チェックボックス行（area 正規化済み）。"""
+    area_labels = getattr(wx, "LOW_LEVEL_SIGWX_AREA_LABELS", {})
+    prows = sig.get("products")
+    if isinstance(prows, list) and prows:
+        rows: list[dict] = []
+        for p in prows:
+            if not isinstance(p, dict):
+                continue
+            a = _norm_sigwx_area(str(p.get("area") or ""))
+            if not a:
+                continue
+            lab = str(p.get("label") or p.get("name") or "").strip()
+            if not lab:
+                lab = area_labels.get(a, a)
+            rows.append({"area": a, "label": lab})
+        if rows:
+            return rows
+    a0 = _norm_sigwx_area(str(sig.get("area") or "fbsn"))
+    lab0 = area_labels.get(a0, a0)
+    return [{"area": a0, "label": lab0}]
+
+
+def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
+    out: list[dict] = []
+    dcf = getattr(wx, "detailed_sigwx_fig_canonical", None)
+    if not callable(dcf):
+        return out
+    prows = dsig.get("products")
+    if not isinstance(prows, list):
+        return out
+    for p in prows:
+        if not isinstance(p, dict):
+            continue
+        fig = p.get("fig") or p.get("areano") or p.get("value")
+        if not fig:
+            continue
+        fk = dcf(str(fig))
+        if not fk:
+            continue
+        lab = str(p.get("label") or p.get("name") or "").strip() or fk
+        out.append({"fig_key": fk, "label": lab})
+    return out
 
 
 def _wx_build_display() -> str:
@@ -178,6 +228,50 @@ def _render_charts_zip(cfg: dict) -> None:
                 st.checkbox("PART2（QMCJ98_）", value=True, key="merge_taf_p2")
         st.divider()
 
+    sigwx_cfg = cfg.get("jma_airinfo_low_level_sigwx")
+    if (
+        isinstance(sigwx_cfg, dict)
+        and sigwx_cfg.get("enabled")
+        and not str(sigwx_cfg.get("url") or "").strip()
+    ):
+        st.markdown("**下層悪天予想図**（結合 PDF・時系列 ft=39）")
+        st.caption("地域を選び、「結合 PDF を生成」に反映されます（すべてオンで従来どおり全地域）。")
+        srows = _sigwx_product_rows(sigwx_cfg)
+        if not srows:
+            st.info("config の `jma_airinfo_low_level_sigwx.products` に `area` を追加してください。")
+        else:
+            sc = st.columns(min(3, len(srows)))
+            for i, sr in enumerate(srows):
+                a = sr["area"]
+                with sc[i % len(sc)]:
+                    st.checkbox(
+                        f"{sr['label']}（{a}）",
+                        value=True,
+                        key=f"merge_sigwx_{a}",
+                    )
+        st.divider()
+
+    dsig_cfg = cfg.get("jma_airinfo_low_level_detailed_sigwx")
+    if isinstance(dsig_cfg, dict) and dsig_cfg.get("enabled"):
+        st.markdown("**下層悪天予想図（詳細版）**（結合 PDF）")
+        st.caption("県を選び、「結合 PDF を生成」に反映されます（すべてオンで従来どおり全件）。")
+        drows = _detailed_sigwx_product_rows(dsig_cfg)
+        if not drows:
+            st.info(
+                "config の `jma_airinfo_low_level_detailed_sigwx.products` に `fig` を追加してください。"
+            )
+        else:
+            dc = st.columns(4)
+            for i, dr in enumerate(drows):
+                fk = dr["fig_key"]
+                with dc[i % 4]:
+                    st.checkbox(
+                        f"{dr['label']}（{fk}）",
+                        value=True,
+                        key=f"merge_dsig_{fk}",
+                    )
+        st.divider()
+
     c1, c2 = st.columns(2)
     with c1:
         if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
@@ -219,12 +313,51 @@ def _render_charts_zip(cfg: dict) -> None:
                         and p2
                     ):
                         merged_taf = {"icaos": sel, "part1": p1, "part2": p2}
+            merged_sigwx_areas: list[str] | None = None
+            use_sigwx_kw = False
+            if (
+                isinstance(sigwx_cfg, dict)
+                and sigwx_cfg.get("enabled")
+                and not str(sigwx_cfg.get("url") or "").strip()
+            ):
+                srows_m = _sigwx_product_rows(sigwx_cfg)
+                if srows_m:
+                    all_sa = [r["area"] for r in srows_m]
+                    sel_sa = [
+                        a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", True)
+                    ]
+                    if not sel_sa:
+                        merged_sigwx_areas = []
+                        use_sigwx_kw = True
+                    elif set(sel_sa) != set(all_sa):
+                        merged_sigwx_areas = sel_sa
+                        use_sigwx_kw = True
+            merged_detailed_figs: list[str] | None = None
+            use_det_kw = False
+            if isinstance(dsig_cfg, dict) and dsig_cfg.get("enabled"):
+                drows_m = _detailed_sigwx_product_rows(dsig_cfg)
+                if drows_m:
+                    all_fk = [r["fig_key"] for r in drows_m]
+                    sel_fk = [
+                        fk
+                        for fk in all_fk
+                        if st.session_state.get(f"merge_dsig_{fk}", True)
+                    ]
+                    if not sel_fk:
+                        merged_detailed_figs = []
+                        use_det_kw = True
+                    elif set(sel_fk) != set(all_fk):
+                        merged_detailed_figs = sel_fk
+                        use_det_kw = True
             if not skip_merge:
+                pdf_kw: dict = {"merged_taf_selection": merged_taf}
+                if use_sigwx_kw:
+                    pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
+                if use_det_kw:
+                    pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
                 with st.spinner("取得・結合中（時間がかかることがあります）…"):
                     try:
-                        data, errs, warns, pages = wx.build_merged_pdf(
-                            cfg, merged_taf_selection=merged_taf
-                        )
+                        data, errs, warns, pages = wx.build_merged_pdf(cfg, **pdf_kw)
                     except RuntimeError as e:
                         st.error(str(e))
                     except Exception as e:  # noqa: BLE001

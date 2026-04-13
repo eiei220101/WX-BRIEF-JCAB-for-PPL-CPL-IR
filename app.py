@@ -176,6 +176,15 @@ JMA_AIRINFO_LOW_LEVEL_SIGWX_BASE = "https://www.data.jma.go.jp/airinfo/data/pict
 JMA_AIRINFO_LOW_LEVEL_SIGWX_AREAS = frozenset(
     {"fbsp", "fbsn", "fbtk", "fbos", "fbkg", "fbok"}
 )
+# awfo_low-level_sigwx.html の areaArray 順（functions.js）に対応する表示名
+LOW_LEVEL_SIGWX_AREA_LABELS: dict[str, str] = {
+    "fbsp": "北海道",
+    "fbsn": "東北",
+    "fbtk": "東日本",
+    "fbos": "西日本",
+    "fbkg": "奄美",
+    "fbok": "沖縄",
+}
 # FT3=03, FT6=06, FT9=09, 時系列=39（changeFT と同一）
 JMA_AIRINFO_LOW_LEVEL_SIGWX_FT = frozenset({"03", "06", "09", "39"})
 # 下層悪天予想図（詳細版）（awfo_low-level_detailed-sigwx.html / functions_low-level_detailed-sigwx.js）
@@ -509,6 +518,16 @@ def jma_airinfo_detailed_sigwx_png_url(fig: str, *, prefix: str | None = None) -
     if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*_", pref):
         raise ValueError("prefix が想定外です（既定は Lsigp_）")
     return f"{JMA_AIRINFO_DETAILED_SIGWX_BASE}{pref}{canon}.png"
+
+
+def detailed_sigwx_fig_canonical(fig: str) -> str | None:
+    """Fig204 / fig204 / Fig_204 等を Fig204 形式に正規化。不正なら None。"""
+    raw = str(fig).strip()
+    compact = re.sub(r"[\s_-]+", "", raw)
+    m = re.fullmatch(r"(?i)fig(\d+)", compact)
+    if not m:
+        return None
+    return f"Fig{m.group(1)}"
 
 
 def jma_airinfo_fxjp106_cross_section_png_url(utc_initial: str) -> str:
@@ -1802,6 +1821,8 @@ def expand_download_items(
     cfg: dict,
     *,
     merged_taf_selection: dict | None = None,
+    merged_sigwx_areas: list[str] | None = None,
+    merged_detailed_sigwx_figs: list[str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """
     config の items に加え、jma_weather_map が有効なら気象庁 bosai の list.json から
@@ -1809,6 +1830,12 @@ def expand_download_items(
 
     merged_taf_selection: 結合 PDF 用。``{"icaos": ["RJSF", ...], "part1": true, "part2": true}`` のとき、
     飛行場時系列予報は該当 ICAO のみ・PART フラグを item に載せる。None で従来どおり全件・PART1+2。
+
+    merged_sigwx_areas: 下層悪天予想図の地域コード（例: fbsn, fbos）のリスト。
+        None は全件（config の products または従来の単一 area）。空リストは同ブロックを出さない。
+
+    merged_detailed_sigwx_figs: 下層悪天予想図（詳細版）の Fig 番号（例: Fig206）のリスト。
+        None は products 全件。空リストは同ブロックを出さない。
     """
     out: list[dict] = []
     warnings: list[str] = []
@@ -1824,6 +1851,21 @@ def expand_download_items(
             }
         taf_part1 = bool(merged_taf_selection.get("part1", True))
         taf_part2 = bool(merged_taf_selection.get("part2", True))
+    sigwx_allow: frozenset[str] | None = None
+    if merged_sigwx_areas is not None:
+        sigwx_allow = frozenset(
+            re.sub(r"[^a-z0-9]", "", str(x)).lower()
+            for x in merged_sigwx_areas
+            if str(x).strip()
+        )
+    detailed_fig_allow: frozenset[str] | None = None
+    if merged_detailed_sigwx_figs is not None:
+        figs: set[str] = set()
+        for raw in merged_detailed_sigwx_figs:
+            c = detailed_sigwx_fig_canonical(str(raw))
+            if c:
+                figs.add(c)
+        detailed_fig_allow = frozenset(figs)
     for it in cfg.get("items") or []:
         if isinstance(it, dict):
             out.append(it)
@@ -2340,77 +2382,150 @@ def expand_download_items(
     sigwx = cfg.get("jma_airinfo_low_level_sigwx")
     if isinstance(sigwx, dict) and sigwx.get("enabled"):
         url_override = str(sigwx.get("url") or "").strip()
-        area = str(sigwx.get("area") or "fbsn").strip().lower()
         ft_raw = sigwx.get("forecast_type")
         if ft_raw is None:
             ft_raw = sigwx.get("ft")
         ft = str(ft_raw if ft_raw is not None else "39").strip().lower()
-        fn = sigwx.get("filename") or "下層悪天予想図_東北_時系列.png"
         if url_override:
-            u = url_override
+            if sigwx_allow is not None and len(sigwx_allow) == 0:
+                pass
+            else:
+                fn = sigwx.get("filename") or "下層悪天予想図.png"
+                out.append(
+                    {
+                        "filename": fn,
+                        "url": url_override,
+                        "comment": (
+                            "気象庁 航空気象情報「下層悪天予想図」（URL 直指定）。"
+                            "固定パスのため取得時点の最新画像が入ります。"
+                        ),
+                    }
+                )
         else:
-            try:
-                u = jma_airinfo_low_level_sigwx_png_url(area, ft)
-            except ValueError as e:
-                warnings.append(f"jma_airinfo_low_level_sigwx: {e}")
-                u = ""
-        if u:
-            out.append(
-                {
-                    "filename": fn,
-                    "url": u,
-                    "comment": (
-                        "気象庁 航空気象情報「下層悪天予想図」（awfo_low-level_sigwx.html / functions.js）。"
-                        f"地域コード **{area}**（東北=fbsn）、予報区分 **{ft}**（39=時系列）。"
-                        "固定パスのため取得時点の最新画像が入ります。"
-                    ),
-                }
-            )
+            if sigwx_allow is not None and len(sigwx_allow) == 0:
+                pass
+            else:
+                prows_sig = sigwx.get("products")
+                if isinstance(prows_sig, list) and prows_sig:
+                    rows: list[dict] = [p for p in prows_sig if isinstance(p, dict)]
+                else:
+                    area0 = str(sigwx.get("area") or "fbsn").strip().lower()
+                    rows = [
+                        {
+                            "area": area0,
+                            "filename": sigwx.get("filename")
+                            or "下層悪天予想図_東北_時系列.png",
+                            "label": LOW_LEVEL_SIGWX_AREA_LABELS.get(area0, area0),
+                        }
+                    ]
+                for pr in rows:
+                    area = str(pr.get("area") or "").strip().lower()
+                    area = re.sub(r"[^a-z0-9]", "", area)
+                    if not area:
+                        warnings.append(
+                            "jma_airinfo_low_level_sigwx: area なしの行をスキップしました"
+                        )
+                        continue
+                    if sigwx_allow is not None and area not in sigwx_allow:
+                        continue
+                    try:
+                        u = jma_airinfo_low_level_sigwx_png_url(area, ft)
+                    except ValueError as e:
+                        warnings.append(f"jma_airinfo_low_level_sigwx ({area}): {e}")
+                        continue
+                    lab = (pr.get("label") or pr.get("name") or "").strip()
+                    if not lab:
+                        lab = LOW_LEVEL_SIGWX_AREA_LABELS.get(area, area)
+                    fn = pr.get("filename") or (
+                        f"下層悪天予想図_{lab}_ft{ft}.png"
+                    )
+                    out.append(
+                        {
+                            "filename": fn,
+                            "url": u,
+                            "comment": (
+                                "気象庁 航空気象情報「下層悪天予想図」"
+                                "（awfo_low-level_sigwx.html / functions.js）。"
+                                f"地域 **{lab}**（area={area}）、予報区分 **{ft}**"
+                                "（39=時系列）。固定パスのため取得時点の最新画像が入ります。"
+                            ),
+                        }
+                    )
 
     dsig = cfg.get("jma_airinfo_low_level_detailed_sigwx")
     if isinstance(dsig, dict) and dsig.get("enabled"):
-        prows = dsig.get("products")
-        if not prows:
-            prows = [
-                {"fig": "Fig206", "filename": "下層悪天予想図_詳細_福島.png", "label": "福島"},
-                {"fig": "Fig204", "filename": "下層悪天予想図_詳細_宮城.png", "label": "宮城"},
-                {"fig": "Fig501", "filename": "下層悪天予想図_詳細_新潟.png", "label": "新潟"},
-            ]
-        pref_default = str(dsig.get("image_prefix") or "").strip() or None
-        for pr in prows:
-            if not isinstance(pr, dict):
-                continue
-            fig = pr.get("fig") or pr.get("areano") or pr.get("value")
-            fn = pr.get("filename")
-            label = (pr.get("label") or pr.get("name") or "").strip()
-            url_override = str(pr.get("url") or "").strip()
-            if not fig:
-                warnings.append("jma_airinfo_low_level_detailed_sigwx: fig なしの行をスキップしました")
-                continue
-            pref = str(pr.get("image_prefix") or "").strip() or pref_default
-            pref_arg = pref if pref else None
-            if url_override:
-                u = url_override
-            else:
-                try:
-                    u = jma_airinfo_detailed_sigwx_png_url(str(fig), prefix=pref_arg)
-                except ValueError as e:
-                    warnings.append(f"jma_airinfo_low_level_detailed_sigwx ({fig}): {e}")
+        if detailed_fig_allow is not None and len(detailed_fig_allow) == 0:
+            pass
+        else:
+            prows = dsig.get("products")
+            if not prows:
+                prows = [
+                    {
+                        "fig": "Fig206",
+                        "filename": "下層悪天予想図_詳細_福島.png",
+                        "label": "福島",
+                    },
+                    {
+                        "fig": "Fig204",
+                        "filename": "下層悪天予想図_詳細_宮城.png",
+                        "label": "宮城",
+                    },
+                    {
+                        "fig": "Fig501",
+                        "filename": "下層悪天予想図_詳細_新潟.png",
+                        "label": "新潟",
+                    },
+                ]
+            pref_default = str(dsig.get("image_prefix") or "").strip() or None
+            for pr in prows:
+                if not isinstance(pr, dict):
                     continue
-            fig_slug = re.sub(r"[^A-Za-z0-9]+", "_", str(fig)).strip("_")
-            out.append(
-                {
-                    "filename": fn or f"下層悪天予想図_詳細_{fig_slug}.png",
-                    "url": u,
-                    "comment": (
-                        "気象庁 航空気象情報「下層悪天予想図（詳細版）」"
-                        "（awfo_low-level_detailed-sigwx.html / functions_low-level_detailed-sigwx.js）。"
-                        f"地域選択 **{fig}**"
-                        + (f"（{label}）" if label else "")
-                        + "。固定パスのため取得時点の最新画像が入ります。"
-                    ),
-                }
-            )
+                fig = pr.get("fig") or pr.get("areano") or pr.get("value")
+                fn = pr.get("filename")
+                label = (pr.get("label") or pr.get("name") or "").strip()
+                url_override = str(pr.get("url") or "").strip()
+                if not fig:
+                    warnings.append(
+                        "jma_airinfo_low_level_detailed_sigwx: fig なしの行をスキップしました"
+                    )
+                    continue
+                fig_key = detailed_sigwx_fig_canonical(str(fig))
+                if not fig_key:
+                    warnings.append(
+                        f"jma_airinfo_low_level_detailed_sigwx: fig 不正のためスキップ: {fig!r}"
+                    )
+                    continue
+                if detailed_fig_allow is not None and fig_key not in detailed_fig_allow:
+                    continue
+                pref = str(pr.get("image_prefix") or "").strip() or pref_default
+                pref_arg = pref if pref else None
+                if url_override:
+                    u = url_override
+                else:
+                    try:
+                        u = jma_airinfo_detailed_sigwx_png_url(
+                            str(fig), prefix=pref_arg
+                        )
+                    except ValueError as e:
+                        warnings.append(
+                            f"jma_airinfo_low_level_detailed_sigwx ({fig}): {e}"
+                        )
+                        continue
+                fig_slug = re.sub(r"[^A-Za-z0-9]+", "_", str(fig)).strip("_")
+                out.append(
+                    {
+                        "filename": fn or f"下層悪天予想図_詳細_{fig_slug}.png",
+                        "url": u,
+                        "comment": (
+                            "気象庁 航空気象情報「下層悪天予想図（詳細版）」"
+                            "（awfo_low-level_detailed-sigwx.html / "
+                            "functions_low-level_detailed-sigwx.js）。"
+                            f"地域選択 **{fig_key}**"
+                            + (f"（{label}）" if label else "")
+                            + "。固定パスのため取得時点の最新画像が入ります。"
+                        ),
+                    }
+                )
 
     fxjp106 = cfg.get("jma_airinfo_fxjp106_cross_section")
     if isinstance(fxjp106, dict) and fxjp106.get("enabled"):
@@ -2679,6 +2794,8 @@ def build_merged_pdf(
     cfg: dict,
     *,
     merged_taf_selection: dict | None = None,
+    merged_sigwx_areas: list[str] | None = None,
+    merged_detailed_sigwx_figs: list[str] | None = None,
 ) -> tuple[bytes, list[str], list[str], int]:
     """
     取得対象をすべて取得し、1つの PDF に連結する。
@@ -2686,6 +2803,9 @@ def build_merged_pdf(
     未対応形式（SVG 等）はスキップして warnings に記録。
 
     merged_taf_selection: Streamlit 等から飛行場時系列予報の ICAO / PART を絞るときに指定。
+
+    merged_sigwx_areas / merged_detailed_sigwx_figs: 下層悪天予想図・詳細版を結合 PDF だけで絞るとき。
+        省略時は expand_download_items の既定（config どおり全件）。
     """
     try:
         from pypdf import PdfReader, PdfWriter
@@ -2699,7 +2819,10 @@ def build_merged_pdf(
     errors: list[str] = []
     warnings: list[str] = []
     items, jma_warnings = expand_download_items(
-        cfg, merged_taf_selection=merged_taf_selection
+        cfg,
+        merged_taf_selection=merged_taf_selection,
+        merged_sigwx_areas=merged_sigwx_areas,
+        merged_detailed_sigwx_figs=merged_detailed_sigwx_figs,
     )
     warnings.extend(jma_warnings)
 
@@ -3381,12 +3504,12 @@ def page_html(cfg: dict) -> str:
     sigwx = cfg.get("jma_airinfo_low_level_sigwx")
     if isinstance(sigwx, dict) and sigwx.get("enabled"):
         auto_lines.append(
-            "航空気象情報・下層悪天予想図（東北 fbsn・時系列 ft=39 / pict/low-level_sigwx/）"
+            "航空気象情報・下層悪天予想図（config の地域コードごと・既定 ft=39 時系列 / pict/low-level_sigwx/）"
         )
     dsig = cfg.get("jma_airinfo_low_level_detailed_sigwx")
     if isinstance(dsig, dict) and dsig.get("enabled"):
         auto_lines.append(
-            "航空気象情報・下層悪天予想図（詳細版）（Fig206 福島・Fig204 宮城・Fig501 新潟 等 / pict/low-level_sigwx_p/）"
+            "航空気象情報・下層悪天予想図（詳細版）（config の Fig ごと / pict/low-level_sigwx_p/）"
         )
     fxjp106 = cfg.get("jma_airinfo_fxjp106_cross_section")
     if isinstance(fxjp106, dict) and fxjp106.get("enabled"):
