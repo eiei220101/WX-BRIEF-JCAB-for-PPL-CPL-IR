@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-68-himawari-playwright-map-screenshot"
+PORTAL_BUILD = "20260413-69-playwright-chromium-auto-install"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -152,6 +152,8 @@ _jma_list_cache: tuple[float, dict] | None = None
 JMA_LIST_CACHE_SEC = 60.0
 _himawari_jp_times_cache: tuple[float, list] | None = None
 HIMI_JP_TIMES_CACHE_SEC = 25.0
+_playwright_chromium_lock = threading.Lock()
+_playwright_chromium_ready = False
 
 
 def _header_safe_ascii(text: str, max_len: int = 2000) -> str:
@@ -966,11 +968,74 @@ def _himawari_map_screenshot_page_url(band: str, msc: dict, row: dict) -> str:
     return ""
 
 
+def _ensure_playwright_chromium_runtime() -> None:
+    """
+    ``pip install playwright`` だけではブラウザバイナリが無い環境（Streamlit Community Cloud 等）向けに、
+    初回起動時に ``python -m playwright install chromium`` を実行する。
+
+    自動実行を禁止する場合: 環境変数 ``WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1``
+    （その場合は手元またはビルドで chromium をインストール済みにすること）。
+    """
+    global _playwright_chromium_ready
+    if _playwright_chromium_ready:
+        return
+    no_auto = os.environ.get("WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    from playwright.sync_api import sync_playwright
+
+    with _playwright_chromium_lock:
+        if _playwright_chromium_ready:
+            return
+
+        def _try_launch() -> bool:
+            try:
+                with sync_playwright() as p:
+                    b = p.chromium.launch(headless=True)
+                    b.close()
+                return True
+            except Exception:
+                return False
+
+        if _try_launch():
+            _playwright_chromium_ready = True
+            return
+        if no_auto:
+            raise ValueError(
+                "Playwright の Chromium が未配置です。環境変数 "
+                "WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1 が付いているため自動インストールをスキップしました。"
+                " `python -m playwright install chromium` を実行するか、当該環境変数を外してください。"
+            )
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc.returncode != 0:
+            tail = (proc.stderr or "")[-2000:]
+            raise ValueError(
+                "Playwright: `python -m playwright install chromium` が失敗しました。"
+                " リポジトリ直下の packages.txt に Chromium 用のシステムパッケージがあるか確認し、再デプロイしてください。"
+                f" stderr末尾: {tail!r}"
+            )
+        if not _try_launch():
+            raise ValueError(
+                "Playwright の Chromium を配置しましたが起動に失敗しました。"
+                " OS の依存ライブラリ不足の可能性があります。packages.txt を見直すか、"
+                " config の bosai_himawari_map_screenshot.enabled を false にしてタイルモザイクへ戻してください。"
+            )
+        _playwright_chromium_ready = True
+
+
 def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
     """
     防災統合地図（map.html）を headless Chromium で開き、ビューポートのスクショを JPEG にする。
 
-    事前: ``pip install playwright`` と ``playwright install chromium``（Streamlit Cloud では未対応のことが多い）。
+    初回は Chromium バイナリの自動ダウンロードを試みる（Streamlit Cloud 向け）。
+    手元では従来どおり ``playwright install chromium`` でも可。
     """
     page_url = str(opts.get("page_url") or "").strip()
     if not page_url.startswith("https://www.jma.go.jp/bosai/map.html"):
@@ -994,6 +1059,8 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(opts: dict) -> bytes:
             "統合地図スクショには Playwright が必要です: "
             "pip install playwright および playwright install chromium を実行してください。"
         ) from e
+
+    _ensure_playwright_chromium_runtime()
 
     from PIL import Image
 
@@ -1785,7 +1852,8 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                     "[map.html](https://www.jma.go.jp/bosai/map.html) を **Playwright（Chromium）** で開き、"
                     "指定 URL のビューポートを撮影した JPEG。"
                     "地図・衛星レイヤの描画待ちは `bosai_himawari_map_screenshot.wait_ms`（既定 12 秒）。"
-                    "環境には `pip install playwright` と `playwright install chromium` が必要（Streamlit Cloud では未対応のことが多い）。"
+                    "初回は Chromium バイナリを自動ダウンロードする（`packages.txt` の OS ライブラリが必要）。"
+                    "手元では `playwright install chromium` でも可。`WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1` で自動 DL を止められる。"
                     "上端の時刻帯の注記は targetTimes に基づくスロットで、**撮影画像の凡例時刻と一致しない場合があります**。"
                     f"観測スロット注記: **日本時間 {slot_jst.year}年{slot_jst.month}月{slot_jst.day}日"
                     f"{slot_jst.hour}時{slot_jst.minute:02d}分** ／ **UTC {utc_main}**。{label}。"
