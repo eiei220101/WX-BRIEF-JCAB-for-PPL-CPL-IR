@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-66-himawari-tightcrop-pixel-bbox"
+PORTAL_BUILD = "20260413-67-himawari-margin-nearblack-letterbox"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -650,15 +650,40 @@ def _himawari_jp_fetch_tile_jpeg(
     return None
 
 
+def _himawari_is_shell_margin_rgb(
+    p: tuple[int, int, int],
+    *,
+    bg: tuple[int, int, int],
+    bg_tol: int,
+    black_max: int,
+) -> bool:
+    """
+    モザイク外周トリム用。欠損タイル色 (32,36,42) に近い画素、またはタイル JPEG 内の
+    レターボックス（純黒〜近黒）をマージンとみなす。black_max < 0 のときは近黒扱いをしない。
+    """
+    r, g, b = p[0], p[1], p[2]
+    br, bgc, bb = bg[0], bg[1], bg[2]
+    if (
+        abs(r - br) <= bg_tol
+        and abs(g - bgc) <= bg_tol
+        and abs(b - bb) <= bg_tol
+    ):
+        return True
+    if black_max < 0:
+        return False
+    return r <= black_max and g <= black_max and b <= black_max
+
+
 def _himawari_trim_uniform_border(
     im,
     *,
     bg: tuple[int, int, int] = (32, 36, 42),
     tol: int = 10,
+    black_max: int = 12,
 ):
     """
-    モザイク外周の「欠損タイル用の均一背景」だけを切り落とす（海・雲は残る）。
-    上下左右から、行・列が背景色に近い限りトリムする。
+    モザイク外周の「欠損タイル用の均一背景」およびタイル内の近黒レターボックス行・列を切り落とす。
+    海・雲は通常その閾値より明るいため残る（赤外で縁の海面が極端に暗いときは margin_black_max を下げる）。
     """
     im = im.convert("RGB")
     w, h = im.size
@@ -666,32 +691,29 @@ def _himawari_trim_uniform_border(
         return im
     px = im.load()
 
-    def is_bg_pixel(x: int, y: int) -> bool:
-        p = px[x, y]
-        return (
-            abs(p[0] - bg[0]) <= tol
-            and abs(p[1] - bg[1]) <= tol
-            and abs(p[2] - bg[2]) <= tol
+    def is_margin_pixel(x: int, y: int) -> bool:
+        return _himawari_is_shell_margin_rgb(
+            px[x, y], bg=bg, bg_tol=tol, black_max=black_max
         )
 
     t = 0
     while t < h:
-        if not all(is_bg_pixel(x, t) for x in range(w)):
+        if not all(is_margin_pixel(x, t) for x in range(w)):
             break
         t += 1
     b = h - 1
     while b >= t:
-        if not all(is_bg_pixel(x, b) for x in range(w)):
+        if not all(is_margin_pixel(x, b) for x in range(w)):
             break
         b -= 1
     l = 0
     while l < w:
-        if not all(is_bg_pixel(l, y) for y in range(t, b + 1)):
+        if not all(is_margin_pixel(l, y) for y in range(t, b + 1)):
             break
         l += 1
     r = w - 1
     while r >= l:
-        if not all(is_bg_pixel(r, y) for y in range(t, b + 1)):
+        if not all(is_margin_pixel(r, y) for y in range(t, b + 1)):
             break
         r -= 1
     if r < l or b < t:
@@ -743,12 +765,14 @@ def _himawari_tight_crop_non_background(
     *,
     bg: tuple[int, int, int] = (32, 36, 42),
     tol: int = 16,
+    black_max: int = 12,
 ):
     """
-    モザイク外周の黒（欠損タイル色）を画素単位で切り落とす。
-    欠損タイルだけの列・行が格子矩形に残るケースを、格子トリムだけでは消せないため用。
+    モザイク外周を画素単位で切り落とす。
+    欠損タイル色 (32,36,42) に加え、タイル JPEG のレターボックス（純黒〜近黒）もマージンとして扱う。
+    black_max < 0 のときは欠損色のみ（従来互換）。
     """
-    from PIL import ImageChops
+    from PIL import ImageChops, ImageOps
 
     rgb = im.convert("RGB")
     w, h = rgb.size
@@ -756,10 +780,20 @@ def _himawari_tight_crop_non_background(
         return rgb
     r, g, b = rgb.split()
     br, bgc, bb = bg
-    mr = r.point(lambda x, br=br, tol=tol: 255 if abs(x - br) > tol else 0)
-    mg = g.point(lambda x, bgc=bgc, tol=tol: 255 if abs(x - bgc) > tol else 0)
-    mb = b.point(lambda x, bb=bb, tol=tol: 255 if abs(x - bb) > tol else 0)
-    m = ImageChops.lighter(ImageChops.lighter(mr, mg), mb)
+    mr = r.point(lambda x, br=br, tol=tol: 255 if abs(x - br) <= tol else 0)
+    mg = g.point(lambda x, bgc=bgc, tol=tol: 255 if abs(x - bgc) <= tol else 0)
+    mb = b.point(lambda x, bb=bb, tol=tol: 255 if abs(x - bb) <= tol else 0)
+    margin_bg = ImageChops.darker(ImageChops.darker(mr, mg), mb)
+    if black_max >= 0:
+        bm = max(0, min(40, int(black_max)))
+        mbr = r.point(lambda x, bm=bm: 255 if x <= bm else 0)
+        mbg = g.point(lambda x, bm=bm: 255 if x <= bm else 0)
+        mbb = b.point(lambda x, bm=bm: 255 if x <= bm else 0)
+        margin_blk = ImageChops.darker(ImageChops.darker(mbr, mbg), mbb)
+        margin = ImageChops.lighter(margin_bg, margin_blk)
+    else:
+        margin = margin_bg
+    m = ImageOps.invert(margin)
     bbox = m.getbbox()
     if not bbox:
         return rgb
@@ -895,12 +929,20 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         canvas = _himawari_crop_canvas_to_filled_tiles(
             canvas, xs, ys, tile_map, tw, th
         )
+    margin_black_max = int(opts.get("margin_black_max", 12))
+    margin_black_max = max(-1, min(40, margin_black_max))
+    trim_tol = int(opts.get("trim_mosaic_border_tol", 10))
+    trim_tol = max(4, min(24, trim_tol))
     if bool(opts.get("trim_mosaic_border", True)):
-        canvas = _himawari_trim_uniform_border(canvas)
+        canvas = _himawari_trim_uniform_border(
+            canvas, tol=trim_tol, black_max=margin_black_max
+        )
     if bool(opts.get("tight_crop_mosaic", True)):
         tol = int(opts.get("tight_crop_mosaic_tol", 16))
         tol = max(6, min(40, tol))
-        canvas = _himawari_tight_crop_non_background(canvas, tol=tol)
+        canvas = _himawari_tight_crop_non_background(
+            canvas, tol=tol, black_max=margin_black_max
+        )
 
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
@@ -1572,6 +1614,10 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                         "tight_crop_mosaic": bool(msc.get("tight_crop_mosaic", True)),
                         "tight_crop_mosaic_tol": int(
                             msc.get("tight_crop_mosaic_tol", 16)
+                        ),
+                        "margin_black_max": int(msc.get("margin_black_max", 12)),
+                        "trim_mosaic_border_tol": int(
+                            msc.get("trim_mosaic_border_tol", 10)
                         ),
                     }
                     qd: dict[str, str] = {
