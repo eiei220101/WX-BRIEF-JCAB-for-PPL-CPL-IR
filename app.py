@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260413-65-himawari-like-map-hash-viewport"
+PORTAL_BUILD = "20260413-66-himawari-tightcrop-pixel-bbox"
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
@@ -738,6 +738,41 @@ def _himawari_crop_canvas_to_filled_tiles(
     return canvas.crop((left, upper, right, lower))
 
 
+def _himawari_tight_crop_non_background(
+    im,
+    *,
+    bg: tuple[int, int, int] = (32, 36, 42),
+    tol: int = 16,
+):
+    """
+    モザイク外周の黒（欠損タイル色）を画素単位で切り落とす。
+    欠損タイルだけの列・行が格子矩形に残るケースを、格子トリムだけでは消せないため用。
+    """
+    from PIL import ImageChops
+
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    if w < 8 or h < 8:
+        return rgb
+    r, g, b = rgb.split()
+    br, bgc, bb = bg
+    mr = r.point(lambda x, br=br, tol=tol: 255 if abs(x - br) > tol else 0)
+    mg = g.point(lambda x, bgc=bgc, tol=tol: 255 if abs(x - bgc) > tol else 0)
+    mb = b.point(lambda x, bb=bb, tol=tol: 255 if abs(x - bb) > tol else 0)
+    m = ImageChops.lighter(ImageChops.lighter(mr, mg), mb)
+    bbox = m.getbbox()
+    if not bbox:
+        return rgb
+    l, t, r2, b2 = bbox
+    l = max(0, l - 1)
+    t = max(0, t - 1)
+    r2 = min(w, r2 + 1)
+    b2 = min(h, b2 + 1)
+    if r2 - l < 48 or b2 - t < 48:
+        return rgb
+    return rgb.crop((l, t, r2, b2))
+
+
 def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
     """
     緯度経度の矩形範囲を Web Mercator（XYZ）タイルで覆い、最大ズームは satimg 実装上限（z=6）まで。
@@ -862,6 +897,10 @@ def build_himawari_jp_mosaic_jpeg_bytes(opts: dict) -> bytes:
         )
     if bool(opts.get("trim_mosaic_border", True)):
         canvas = _himawari_trim_uniform_border(canvas)
+    if bool(opts.get("tight_crop_mosaic", True)):
+        tol = int(opts.get("tight_crop_mosaic_tol", 16))
+        tol = max(6, min(40, tol))
+        canvas = _himawari_tight_crop_non_background(canvas, tol=tol)
 
     buf = io.BytesIO()
     canvas.save(buf, format="JPEG", quality=96, subsampling=0, optimize=True)
@@ -1529,6 +1568,10 @@ def expand_download_items(cfg: dict) -> tuple[list[dict], list[str]]:
                         ),
                         "crop_mosaic_to_filled_tiles": bool(
                             msc.get("crop_mosaic_to_filled_tiles", True)
+                        ),
+                        "tight_crop_mosaic": bool(msc.get("tight_crop_mosaic", True)),
+                        "tight_crop_mosaic_tol": int(
+                            msc.get("tight_crop_mosaic_tol", 16)
                         ),
                     }
                     qd: dict[str, str] = {
