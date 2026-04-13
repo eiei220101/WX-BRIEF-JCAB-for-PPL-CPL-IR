@@ -25,6 +25,18 @@ if str(_ROOT) not in sys.path:
 
 import app as wx  # noqa: E402
 
+
+def _wx_build_display() -> str:
+    """Streamlit Cloud が古い app.py のときも落ちない（portal_build_stamp 未実装なら PORTAL_BUILD のみ）。"""
+    fn = getattr(wx, "portal_build_stamp", None)
+    if callable(fn):
+        try:
+            return str(fn())
+        except Exception:  # noqa: BLE001
+            pass
+    return str(getattr(wx, "PORTAL_BUILD", "unknown"))
+
+
 # 衛星などのキャプション文字は app.py の Pillow（_hrpns_caption_font）で描画する。
 # Streamlit Cloud: リポジトリ直下の packages.txt で fonts-noto-cjk を入れる。
 # 自前フォント: wx-briefing-portal/fonts/ に .otf/.ttf を置くか、環境変数
@@ -324,8 +336,8 @@ def main() -> None:
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(
-        f"ビルド: {wx.portal_build_stamp()} · Streamlit 版"
-        " — 手動ラベル（`PORTAL_BUILD`）・**app.py の最終更新（UTC）**・（リポジトリ内なら）**git の短いコミット**。"
+        f"ビルド: {_wx_build_display()} · Streamlit 版"
+        " — 手動ラベル（`PORTAL_BUILD`）・（最新の **app.py** では）**app.py の最終更新（UTC）**・（リポジトリ内なら）**git の短いコミット**。"
         " 更新時刻が直近の保存と一致すれば、このアプリが読み込んでいる **app.py** は新しいです。"
     )
 
