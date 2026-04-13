@@ -649,10 +649,19 @@ def build_airinfo_taf_merged_pdf_bytes(item: dict, timeout: int = 90) -> bytes:
     res = min(300.0, max(72.0, res))
     writer = PdfWriter()
     blobs: list[bytes] = []
-    if inc1:
+    if inc1 and inc2:
+        u1 = jma_airinfo_taf_part_png_url(icao, 1)
+        u2 = jma_airinfo_taf_part_png_url(icao, 2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+            fut1 = ex.submit(fetch_url, u1, timeout)
+            fut2 = ex.submit(fetch_url, u2, timeout)
+            b1, _ = fut1.result()
+            b2, _ = fut2.result()
+        blobs.extend((b1, b2))
+    elif inc1:
         b1, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 1), timeout=timeout)
         blobs.append(b1)
-    if inc2:
+    elif inc2:
         b2, _ = fetch_url(jma_airinfo_taf_part_png_url(icao, 2), timeout=timeout)
         blobs.append(b2)
     for raw in blobs:
@@ -2026,6 +2035,60 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
     return data, ctype
 
 
+def _merged_pdf_max_fetch_workers(cfg: dict, n_jobs: int) -> int:
+    """
+    結合 PDF 取得の並列度。config の merged_pdf.fetch_workers（または merged_pdf.max_fetch_workers）、
+    トップレベル merged_pdf_fetch_workers のいずれか。既定 8、1〜24、件数を超えない。
+    """
+    raw = None
+    block = cfg.get("merged_pdf")
+    if isinstance(block, dict):
+        raw = block.get("fetch_workers", block.get("max_fetch_workers"))
+    if raw is None:
+        raw = cfg.get("merged_pdf_fetch_workers")
+    try:
+        w = int(raw) if raw is not None else 8
+    except (TypeError, ValueError):
+        w = 8
+    w = max(1, min(24, w))
+    if n_jobs > 0:
+        w = min(w, n_jobs)
+    return w
+
+
+def _merged_pdf_fetch_one(ix_item: tuple[int, dict]) -> tuple[int, dict, str, str, bytes | None, str | None, str | None]:
+    """
+    結合 PDF 用の 1 件取得。戻り値:
+    (index, item, name, kind, data, ctype, message)
+    kind は ok | no_url | svg | err
+    """
+    i, item = ix_item
+    name = str(item.get("filename") or f"file_{i + 1}.bin")
+    url = item.get("url")
+    low = name.lower()
+    if not url:
+        return i, item, name, "no_url", None, None, f"{name}: URL なし"
+    if low.endswith(".svg") or low.endswith(".svgz"):
+        return (
+            i,
+            item,
+            name,
+            "svg",
+            None,
+            None,
+            f"{name}: SVG は結合対象外のためスキップしました",
+        )
+    try:
+        data, ctype = fetch_item_bytes(item)
+        return i, item, name, "ok", data, ctype, None
+    except urllib.error.HTTPError as e:
+        return i, item, name, "err", None, None, f"{name}: HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return i, item, name, "err", None, None, f"{name}: {e.reason}"
+    except Exception as e:  # noqa: BLE001
+        return i, item, name, "err", None, None, f"{name}: {e}"
+
+
 def expand_download_items(
     cfg: dict,
     *,
@@ -3022,6 +3085,10 @@ def build_merged_pdf(
     PDF はページとして追加、PNG/JPEG/GIF は1枚1ページの PDF にしてから追加。
     未対応形式（SVG 等）はスキップして warnings に記録。
 
+    取得は HTTP 等が独立している限り ``ThreadPoolExecutor`` で並列化し、
+    **ページ順は expand_download_items の items 順のまま**（正確性を維持）。
+    並列度は ``config["merged_pdf"]["fetch_workers"]``（既定 8、上限 24）。
+
     merged_taf_selection: Streamlit 等から飛行場時系列予報の ICAO / PART を絞るときに指定。
 
     merged_sigwx_areas / merged_detailed_sigwx_figs: 下層悪天予想図・詳細版を結合 PDF だけで絞るとき。
@@ -3049,30 +3116,33 @@ def build_merged_pdf(
     writer = PdfWriter()
     pages_added = 0
 
-    for i, item in enumerate(items):
-        if not isinstance(item, dict):
+    fetch_jobs: list[tuple[int, dict]] = [
+        (i, it) for i, it in enumerate(items) if isinstance(it, dict)
+    ]
+    max_w = _merged_pdf_max_fetch_workers(cfg, len(fetch_jobs))
+    if max_w <= 1 or len(fetch_jobs) <= 1:
+        fetched_rows = [_merged_pdf_fetch_one(job) for job in fetch_jobs]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
+            fetched_rows = list(ex.map(_merged_pdf_fetch_one, fetch_jobs))
+
+    for _i, item, name, kind, data, _ctype, msg in fetched_rows:
+        if kind == "no_url":
+            if msg:
+                errors.append(msg)
             continue
-        url = item.get("url")
-        name = item.get("filename") or f"file_{i + 1}.bin"
-        if not url:
-            errors.append(f"{name}: URL なし")
+        if kind == "svg":
+            if msg:
+                warnings.append(msg)
             continue
-        low = name.lower()
-        if low.endswith(".svg") or low.endswith(".svgz"):
-            warnings.append(f"{name}: SVG は結合対象外のためスキップしました")
+        if kind == "err":
+            if msg:
+                errors.append(msg)
+            continue
+        if kind != "ok" or data is None:
             continue
 
-        try:
-            data, _ctype = fetch_item_bytes(item)
-        except urllib.error.HTTPError as e:
-            errors.append(f"{name}: HTTP {e.code}")
-            continue
-        except urllib.error.URLError as e:
-            errors.append(f"{name}: {e.reason}")
-            continue
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"{name}: {e}")
-            continue
+        low = name.lower()
 
         try:
             if low.endswith(".pdf"):

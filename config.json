@@ -9,6 +9,9 @@
     "password": ""
   },
   "open_browser": true,
+  "merged_pdf": {
+    "fetch_workers": 8
+  },
   "items": [
     {
       "filename": "短期予報解説資料_最新.pdf",
