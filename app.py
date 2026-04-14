@@ -121,6 +121,9 @@ def portal_build_short_stamp() -> str:
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
+# NOAA TGFTP（テキスト）: AWC API に無い/204 のときのフォールバック
+NOAA_TGFTP_METAR_BASE = "https://tgftp.nws.noaa.gov/data/observations/metar/stations/"
+NOAA_TGFTP_TAF_BASE = "https://tgftp.nws.noaa.gov/data/forecasts/taf/stations/"
 # 国際気象海洋㈱ SmartPhone 版（公式 API ではなく HTML。source=imoc のとき）
 IMOC_SMARTPHONE_D = "https://www.imoc.co.jp/SmartPhone/d"
 # metar.php の Area=（地域）一覧内の Port= リンク先
@@ -3291,6 +3294,8 @@ def _fetch_awc_metar_raw(icao: str, timeout: int = 25) -> str | None:
     q = urllib.parse.urlencode({"ids": icao.upper(), "format": "json"})
     url = f"{AWC_API_METAR}?{q}"
     raw, _ = fetch_url(url, timeout=timeout)
+    if not raw:
+        return None
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, list) or not data:
         return None
@@ -3305,6 +3310,8 @@ def _fetch_awc_taf_raw(icao: str, timeout: int = 25) -> str | None:
     q = urllib.parse.urlencode({"ids": icao.upper(), "format": "json"})
     url = f"{AWC_API_TAF}?{q}"
     raw, _ = fetch_url(url, timeout=timeout)
+    if not raw:
+        return None
     data = json.loads(raw.decode("utf-8"))
     if not isinstance(data, list) or not data:
         return None
@@ -3313,6 +3320,57 @@ def _fetch_awc_taf_raw(icao: str, timeout: int = 25) -> str | None:
         return None
     t = first.get("rawTAF")
     return str(t).strip() if t else None
+
+
+def _noaa_text_second_line(raw: bytes) -> str | None:
+    """
+    NOAA TGFTP の stations/*.TXT は先頭行が更新時刻、2行目以降に生報文が入る形式が多い。
+    2行目（存在しなければ最初の非空行）を返す。
+    """
+    if not raw:
+        return None
+    txt = raw.decode("utf-8", errors="ignore")
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    if len(lines) >= 2:
+        return lines[1]
+    return lines[0]
+
+
+def _fetch_noaa_tgftp_metar_raw(icao: str, timeout: int = 25) -> str | None:
+    code = re.sub(r"[^A-Za-z0-9]", "", str(icao)).upper()
+    if len(code) != 4:
+        return None
+    url = f"{NOAA_TGFTP_METAR_BASE}{code}.TXT"
+    try:
+        raw, _ = fetch_url(url, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return None
+    met = _noaa_text_second_line(raw)
+    if met and code in met.upper() and "METAR" in met.upper():
+        return met
+    # 一部は METAR 文字列無しのことがあるため、コード + DDHHMMZ 形式でも許容
+    if met and re.search(rf"\\b{re.escape(code)}\\b\\s+\\d{{6}}Z\\b", met.upper()):
+        return met
+    return met or None
+
+
+def _fetch_noaa_tgftp_taf_raw(icao: str, timeout: int = 25) -> str | None:
+    code = re.sub(r"[^A-Za-z0-9]", "", str(icao)).upper()
+    if len(code) != 4:
+        return None
+    url = f"{NOAA_TGFTP_TAF_BASE}{code}.TXT"
+    try:
+        raw, _ = fetch_url(url, timeout=timeout)
+    except Exception:  # noqa: BLE001
+        return None
+    taf = _noaa_text_second_line(raw)
+    if taf and code in taf.upper() and "TAF" in taf.upper():
+        return taf
+    if taf and re.search(rf"\\bTAF\\b\\s+{re.escape(code)}\\b", taf.upper()):
+        return taf
+    return taf or None
 
 
 def metar_taf_source(cfg: dict) -> str:
@@ -3565,8 +3623,15 @@ def build_metar_taf_pdf_bytes(
             try:
                 if source == "noaa_awc":
                     met = _fetch_awc_metar_raw(code)
+                    if not met:
+                        met = _fetch_noaa_tgftp_metar_raw(code)
                 else:
                     met = _fetch_imoc_metar_raw(code, imoc_html_cache)
+                    # imoc に無い空港があるため、取れなければ NOAA(AWC) にフォールバックする
+                    if not met:
+                        met = _fetch_awc_metar_raw(code)
+                    if not met:
+                        met = _fetch_noaa_tgftp_metar_raw(code)
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{code} METAR: {e}")
                 met = None
@@ -3574,8 +3639,15 @@ def build_metar_taf_pdf_bytes(
             try:
                 if source == "noaa_awc":
                     taf = _fetch_awc_taf_raw(code)
+                    if not taf:
+                        taf = _fetch_noaa_tgftp_taf_raw(code)
                 else:
                     taf = _fetch_imoc_taf_raw(code, imoc_html_cache)
+                    # imoc に無い空港があるため、取れなければ NOAA(AWC) にフォールバックする
+                    if not taf:
+                        taf = _fetch_awc_taf_raw(code)
+                    if not taf:
+                        taf = _fetch_noaa_tgftp_taf_raw(code)
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{code} TAF: {e}")
                 taf = None
