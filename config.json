@@ -90,7 +90,14 @@
       { "fig": "Fig501", "filename": "下層悪天予想図_詳細_新潟県.png", "label": "新潟県" },
       { "fig": "Fig203", "filename": "下層悪天予想図_詳細_岩手県.png", "label": "岩手県" },
       { "fig": "Fig301", "filename": "下層悪天予想図_詳細_茨城県.png", "label": "茨城県" },
-      { "fig": "Fig302", "filename": "下層悪天予想図_詳細_栃木県.png", "label": "栃木県" }
+      { "fig": "Fig302", "filename": "下層悪天予想図_詳細_栃木県.png", "label": "栃木県" },
+      { "fig": "Fig801", "filename": "下層悪天予想図_詳細_福岡県.png", "label": "福岡県" },
+      { "fig": "Fig805", "filename": "下層悪天予想図_詳細_佐賀県.png", "label": "佐賀県" },
+      { "fig": "Fig803", "filename": "下層悪天予想図_詳細_長崎県.png", "label": "長崎県" },
+      { "fig": "Fig806", "filename": "下層悪天予想図_詳細_熊本県.png", "label": "熊本県" },
+      { "fig": "Fig802", "filename": "下層悪天予想図_詳細_大分県.png", "label": "大分県" },
+      { "fig": "Fig807", "filename": "下層悪天予想図_詳細_宮崎県.png", "label": "宮崎県" },
+      { "fig": "Fig808", "filename": "下層悪天予想図_詳細_鹿児島県.png", "label": "鹿児島県" }
     ]
   },
   "jma_airinfo_fxjp106_cross_section": {

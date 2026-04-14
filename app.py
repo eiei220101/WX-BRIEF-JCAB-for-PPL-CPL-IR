@@ -238,6 +238,19 @@ UI_REGION_GROUPS_DETAILED_SIGWX: list[dict] = [
             "Fig302",
         ),
     },
+    {
+        "id": "kyushu",
+        "title": "九州",
+        "figs": (
+            "Fig801",  # 福岡
+            "Fig805",  # 佐賀
+            "Fig803",  # 長崎
+            "Fig806",  # 熊本
+            "Fig802",  # 大分
+            "Fig807",  # 宮崎
+            "Fig808",  # 鹿児島
+        ),
+    },
 ]
 # 下層悪天予想図（地域別・時系列）: 東北を「東北・関東」枠、西日本を別枠
 UI_REGION_GROUPS_SIGWX_AREA: list[dict] = [
@@ -775,6 +788,13 @@ JMA_DETAILED_SIGWX_FIG_LABELS_JA: dict[str, str] = {
     "Fig301": "茨城県",
     "Fig302": "栃木県",
     "Fig501": "新潟県",
+    "Fig801": "福岡県",
+    "Fig805": "佐賀県",
+    "Fig803": "長崎県",
+    "Fig806": "熊本県",
+    "Fig802": "大分県",
+    "Fig807": "宮崎県",
+    "Fig808": "鹿児島県",
 }
 
 

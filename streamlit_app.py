@@ -461,16 +461,19 @@ def _render_charts_zip(cfg: dict) -> None:
             for title, dlist in dblocks:
                 if not dlist:
                     continue
-                _ds_keys = (
-                    [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
-                    if title == TOHOKU_KANTO_UI_TITLE
-                    else None
-                )
+                _ds_keys: list[str] | None = None
+                _ds_selall_key: str | None = None
+                if title == TOHOKU_KANTO_UI_TITLE:
+                    _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                    _ds_selall_key = "merge_dsig_selall_tohoku_kanto"
+                elif title == KYUSHU_UI_TITLE:
+                    _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                    _ds_selall_key = "merge_dsig_selall_kyushu"
                 with st.container(border=True):
                     _region_title_heading(title)
-                    if _ds_keys is not None:
+                    if _ds_keys is not None and _ds_selall_key is not None:
                         _region_select_all_header(
-                            "merge_dsig_selall_tohoku_kanto",
+                            _ds_selall_key,
                             _ds_keys,
                         )
                         st.markdown(
