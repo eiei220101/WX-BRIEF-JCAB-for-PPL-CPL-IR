@@ -29,6 +29,7 @@ import app as wx  # noqa: E402
 
 # UI 地域見出し（app.py の UI_REGION_GROUPS_* の title と一致させる）
 TOHOKU_KANTO_UI_TITLE = "東北・関東"
+KYUSHU_UI_TITLE = "九州"
 
 
 def _group_select_all_callback(sel_key: str, target_keys: list[str]):
@@ -264,15 +265,18 @@ def _render_metar_taf(cfg: dict) -> None:
     for title, aps in wx.group_metar_taf_airports_by_region(airports):
         if not aps:
             continue
-        _mt_keys = (
-            [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
-            if title == TOHOKU_KANTO_UI_TITLE
-            else None
-        )
+        _mt_keys: list[str] | None = None
+        _mt_selall_key: str | None = None
+        if title == TOHOKU_KANTO_UI_TITLE:
+            _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
+            _mt_selall_key = "mt_selall_tohoku_kanto"
+        elif title == KYUSHU_UI_TITLE:
+            _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
+            _mt_selall_key = "mt_selall_kyushu"
         with st.container(border=True):
             _region_title_heading(title)
-            if _mt_keys is not None:
-                _region_select_all_header("mt_selall_tohoku_kanto", _mt_keys)
+            if _mt_keys is not None and _mt_selall_key is not None:
+                _region_select_all_header(_mt_selall_key, _mt_keys)
                 st.markdown(
                     '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                     unsafe_allow_html=True,
@@ -360,19 +364,25 @@ def _render_charts_zip(cfg: dict) -> None:
             for title, plist in blocks:
                 if not plist:
                     continue
-                _taf_keys = (
-                    [
+                _taf_keys: list[str] | None = None
+                _taf_selall_key: str | None = None
+                if title == TOHOKU_KANTO_UI_TITLE:
+                    _taf_keys = [
                         f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
                         for pr in plist
                     ]
-                    if title == TOHOKU_KANTO_UI_TITLE
-                    else None
-                )
+                    _taf_selall_key = "merge_taf_selall_tohoku_kanto"
+                elif title == KYUSHU_UI_TITLE:
+                    _taf_keys = [
+                        f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                        for pr in plist
+                    ]
+                    _taf_selall_key = "merge_taf_selall_kyushu"
                 with st.container(border=True):
                     _region_title_heading(title)
-                    if _taf_keys is not None:
+                    if _taf_keys is not None and _taf_selall_key is not None:
                         _region_select_all_header(
-                            "merge_taf_selall_tohoku_kanto",
+                            _taf_selall_key,
                             _taf_keys,
                         )
                         st.markdown(
