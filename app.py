@@ -150,6 +150,10 @@ IMOC_TAF_AREA_BY_ICAO: dict[str, int | None] = {
     "RJAH": 1,
     "RJSK": 0,
 }
+_IMOC_METAR_AREAS_DISCOVERED: list[int] | None = None
+_IMOC_TAF_AREAS_DISCOVERED: list[int] | None = None
+_IMOC_METAR_AREA_AUTO_CACHE: dict[str, int | None] = {}
+_IMOC_TAF_AREA_AUTO_CACHE: dict[str, int | None] = {}
 # 既定の対象空港（config.metar_taf_fetch.airports が空のとき）
 METAR_TAF_DEFAULT_AIRPORTS: list[dict[str, str]] = [
     {"icao": "RJSF", "label": "福島空港"},
@@ -3445,7 +3449,9 @@ def _fetch_imoc_metar_raw(icao: str, cache: dict[str, str], timeout: int = 25) -
     code = icao.upper()
     area = IMOC_METAR_AREA_BY_ICAO.get(code)
     if area is None:
-        return None
+        area = _imoc_guess_metar_area(code, cache, timeout=timeout)
+        if area is None:
+            return None
     url = (
         f"{IMOC_SMARTPHONE_D}/metar.php?"
         f"{urllib.parse.urlencode({'Lang': 'Jpn', 'Area': str(area), 'Port': code})}"
@@ -3460,7 +3466,9 @@ def _fetch_imoc_taf_raw(icao: str, cache: dict[str, str], timeout: int = 25) -> 
     code = icao.upper()
     area = IMOC_TAF_AREA_BY_ICAO.get(code)
     if area is None:
-        return None
+        area = _imoc_guess_taf_area(code, cache, timeout=timeout)
+        if area is None:
+            return None
     url = (
         f"{IMOC_SMARTPHONE_D}/taf.php?"
         f"{urllib.parse.urlencode({'Lang': 'Jpn', 'Area': str(area)})}"
@@ -3469,6 +3477,68 @@ def _fetch_imoc_taf_raw(icao: str, cache: dict[str, str], timeout: int = 25) -> 
         raw, _ = fetch_url(url, timeout=timeout)
         cache[url] = raw.decode("utf-8", errors="replace")
     return _parse_imoc_taf_station_html(cache[url], code)
+
+
+def _imoc_discover_areas(kind: str, cache: dict[str, str], timeout: int = 25) -> list[int]:
+    """
+    imoc の metar.php / taf.php の地域リンクから Area 番号を抽出。
+    kind: "metar" / "taf"
+    """
+    global _IMOC_METAR_AREAS_DISCOVERED, _IMOC_TAF_AREAS_DISCOVERED
+    if kind == "metar" and _IMOC_METAR_AREAS_DISCOVERED is not None:
+        return _IMOC_METAR_AREAS_DISCOVERED
+    if kind == "taf" and _IMOC_TAF_AREAS_DISCOVERED is not None:
+        return _IMOC_TAF_AREAS_DISCOVERED
+    url = f"{IMOC_SMARTPHONE_D}/{kind}.php?{urllib.parse.urlencode({'Lang': 'Jpn'})}"
+    if url not in cache:
+        raw, _ = fetch_url(url, timeout=timeout)
+        cache[url] = raw.decode("utf-8", errors="replace")
+    html0 = cache[url]
+    # 例: metar.php?Lang=Jpn&Area=9
+    areas = sorted({int(m.group(1)) for m in re.finditer(r"[?&]Area=(\d+)", html0)})
+    if kind == "metar":
+        _IMOC_METAR_AREAS_DISCOVERED = areas
+    else:
+        _IMOC_TAF_AREAS_DISCOVERED = areas
+    return areas
+
+
+def _imoc_guess_metar_area(icao: str, cache: dict[str, str], timeout: int = 25) -> int | None:
+    code = str(icao).strip().upper()
+    if len(code) != 4:
+        return None
+    if code in _IMOC_METAR_AREA_AUTO_CACHE:
+        return _IMOC_METAR_AREA_AUTO_CACHE[code]
+    for area in _imoc_discover_areas("metar", cache, timeout=timeout):
+        url = f"{IMOC_SMARTPHONE_D}/metar.php?{urllib.parse.urlencode({'Lang': 'Jpn', 'Area': str(area)})}"
+        if url not in cache:
+            raw, _ = fetch_url(url, timeout=timeout)
+            cache[url] = raw.decode("utf-8", errors="replace")
+        if f"({code})" in cache[url]:
+            _IMOC_METAR_AREA_AUTO_CACHE[code] = area
+            IMOC_METAR_AREA_BY_ICAO[code] = area
+            return area
+    _IMOC_METAR_AREA_AUTO_CACHE[code] = None
+    return None
+
+
+def _imoc_guess_taf_area(icao: str, cache: dict[str, str], timeout: int = 25) -> int | None:
+    code = str(icao).strip().upper()
+    if len(code) != 4:
+        return None
+    if code in _IMOC_TAF_AREA_AUTO_CACHE:
+        return _IMOC_TAF_AREA_AUTO_CACHE[code]
+    for area in _imoc_discover_areas("taf", cache, timeout=timeout):
+        url = f"{IMOC_SMARTPHONE_D}/taf.php?{urllib.parse.urlencode({'Lang': 'Jpn', 'Area': str(area)})}"
+        if url not in cache:
+            raw, _ = fetch_url(url, timeout=timeout)
+            cache[url] = raw.decode("utf-8", errors="replace")
+        if f"({code})" in cache[url]:
+            _IMOC_TAF_AREA_AUTO_CACHE[code] = area
+            IMOC_TAF_AREA_BY_ICAO[code] = area
+            return area
+    _IMOC_TAF_AREA_AUTO_CACHE[code] = None
+    return None
 
 
 def _metar_taf_ddhhmmz_to_jst_display(raw: str | None) -> str | None:
@@ -3557,6 +3627,9 @@ def build_metar_taf_pdf_bytes(
 
     source = metar_taf_source(cfg)
     imoc_html_cache: dict[str, str] = {}
+    # imoc 取得に失敗したとき NOAA に逃がすか（既定: False = imoc のみ）
+    mt_block = cfg.get("metar_taf_fetch")
+    allow_fallback = bool(mt_block.get("fallback_to_noaa")) if isinstance(mt_block, dict) else False
 
     font = _metar_taf_pdf_font_name()
     styles = getSampleStyleSheet()
@@ -3627,11 +3700,8 @@ def build_metar_taf_pdf_bytes(
                         met = _fetch_noaa_tgftp_metar_raw(code)
                 else:
                     met = _fetch_imoc_metar_raw(code, imoc_html_cache)
-                    # imoc に無い空港があるため、取れなければ NOAA(AWC) にフォールバックする
-                    if not met:
-                        met = _fetch_awc_metar_raw(code)
-                    if not met:
-                        met = _fetch_noaa_tgftp_metar_raw(code)
+                    if allow_fallback and not met:
+                        met = _fetch_awc_metar_raw(code) or _fetch_noaa_tgftp_metar_raw(code)
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{code} METAR: {e}")
                 met = None
@@ -3643,11 +3713,8 @@ def build_metar_taf_pdf_bytes(
                         taf = _fetch_noaa_tgftp_taf_raw(code)
                 else:
                     taf = _fetch_imoc_taf_raw(code, imoc_html_cache)
-                    # imoc に無い空港があるため、取れなければ NOAA(AWC) にフォールバックする
-                    if not taf:
-                        taf = _fetch_awc_taf_raw(code)
-                    if not taf:
-                        taf = _fetch_noaa_tgftp_taf_raw(code)
+                    if allow_fallback and not taf:
+                        taf = _fetch_awc_taf_raw(code) or _fetch_noaa_tgftp_taf_raw(code)
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"{code} TAF: {e}")
                 taf = None

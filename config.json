@@ -176,6 +176,7 @@
   "metar_taf_fetch": {
     "enabled": true,
     "source": "imoc",
+    "fallback_to_noaa": false,
     "airports": [
       { "icao": "RJSF", "label": "福島空港" },
       { "icao": "RJSS", "label": "仙台空港" },
