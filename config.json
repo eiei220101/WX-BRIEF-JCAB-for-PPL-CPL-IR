@@ -39,7 +39,28 @@
   },
   "jma_typhoon": {
     "enabled": true,
-    "products": []
+    "products": [
+      {
+        "id": "track_jma",
+        "label": "台風予想進路図（気象庁）",
+        "filename": "台風予想進路図_気象庁.png"
+      },
+      {
+        "id": "track_usn",
+        "label": "台風予想進路図（米国海軍）",
+        "filename": "台風予想進路図_米国海軍.png"
+      },
+      {
+        "id": "sst_jma",
+        "label": "海水温（気象庁）",
+        "filename": "海水温_気象庁.png"
+      },
+      {
+        "id": "sst_jcg",
+        "label": "海水温（海上保安庁）",
+        "filename": "海水温_海上保安庁.png"
+      }
+    ]
   },
   "jma_quickdaily_asas": {
     "enabled": true,

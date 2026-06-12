@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-76-typhoon-section"
+PORTAL_BUILD = "20260414-77-typhoon-products"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -432,6 +432,21 @@ def typhoon_product_rows(cfg_typhoon: dict) -> list[dict]:
         lab = str(p.get("label") or p.get("name") or pid).strip() or pid
         rows.append({"id": pid, "label": lab})
     return rows
+
+
+def typhoon_product_lookup(cfg_typhoon: dict) -> dict[str, dict]:
+    """jma_typhoon.products を正規化 id → 行 dict に索引。"""
+    out: dict[str, dict] = {}
+    prows = cfg_typhoon.get("products")
+    if not isinstance(prows, list):
+        return out
+    for p in prows:
+        if not isinstance(p, dict):
+            continue
+        pid = typhoon_product_id_norm(str(p.get("id") or ""))
+        if pid:
+            out[pid] = p
+    return out
 
 
 def _metar_taf_pdf_font_name() -> str:
@@ -2357,8 +2372,10 @@ def expand_download_items(
                     continue
                 url = str(pr.get("url") or "").strip()
                 if not url:
+                    label = str(pr.get("label") or pr.get("name") or pid).strip() or pid
                     warnings.append(
-                        f"jma_typhoon ({pid}): url 未設定のためスキップしました"
+                        f"台風関連「{label}」: url 未設定のためスキップしました"
+                        "（config jma_typhoon.products に url を追加してください）"
                     )
                     continue
                 fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()

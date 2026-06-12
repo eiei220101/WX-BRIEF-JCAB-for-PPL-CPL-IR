@@ -356,14 +356,15 @@ def _render_charts_zip(cfg: dict) -> None:
         with st.container(border=True):
             st.markdown("**台風関連**（結合 PDF）")
             st.caption(
-                "台風関連資料を選び、「結合 PDF を生成」に反映されます。"
+                "資料を選び、「結合 PDF を生成」に反映されます。"
                 " 初期状態はすべてオフです。すべてオンで config の全件を含めます。"
+                " 取得 URL は `config.json` の各 product に `url` を追加してください。"
             )
             trows = _typhoon_product_rows(typhoon_cfg)
             if not trows:
                 st.info(
                     "config の `jma_typhoon.products` に "
-                    "`id` / `label` / `filename` / `url` を追加してください。"
+                    "`id` / `label` / `filename` を追加してください。"
                 )
             else:
                 t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
@@ -372,10 +373,10 @@ def _render_charts_zip(cfg: dict) -> None:
                     '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                     unsafe_allow_html=True,
                 )
-                tc = st.columns(min(3, max(1, len(trows))))
+                tc = st.columns(2)
                 for i, tr in enumerate(trows):
                     tid = tr["id"]
-                    with tc[i % len(tc)]:
+                    with tc[i % 2]:
                         st.checkbox(
                             str(tr["label"]).strip(),
                             value=False,
@@ -617,6 +618,7 @@ def _render_charts_zip(cfg: dict) -> None:
                         use_det_kw = True
             merged_typhoon_ids: list[str] | None = None
             use_typhoon_kw = False
+            sel_typhoon_for_warn: list[str] = []
             if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
                 trows_m = _typhoon_product_rows(typhoon_cfg)
                 if trows_m:
@@ -626,6 +628,7 @@ def _render_charts_zip(cfg: dict) -> None:
                         for tid in all_tid
                         if st.session_state.get(f"merge_typhoon_{tid}", False)
                     ]
+                    sel_typhoon_for_warn = sel_tid
                     if not sel_tid:
                         merged_typhoon_ids = []
                         use_typhoon_kw = True
@@ -633,6 +636,22 @@ def _render_charts_zip(cfg: dict) -> None:
                         merged_typhoon_ids = sel_tid
                         use_typhoon_kw = True
             if not skip_merged_pdf:
+                if sel_typhoon_for_warn:
+                    t_lookup = getattr(wx, "typhoon_product_lookup", None)
+                    if callable(t_lookup):
+                        by_id = t_lookup(typhoon_cfg)
+                        no_url = [
+                            str(r["label"]).strip()
+                            for r in trows_m
+                            if r["id"] in sel_typhoon_for_warn
+                            and not str(by_id.get(r["id"], {}).get("url") or "").strip()
+                        ]
+                        if no_url:
+                            st.warning(
+                                "台風関連（url 未設定）: "
+                                + "、".join(no_url)
+                                + " — config.json の `jma_typhoon.products` に url を追加してください。"
+                            )
                 pdf_kw: dict = {"merged_taf_selection": merged_taf}
                 if use_sigwx_kw:
                     pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
