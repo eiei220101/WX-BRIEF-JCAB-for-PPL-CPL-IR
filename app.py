@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-75-streamlit-taf-merge-select"
+PORTAL_BUILD = "20260414-76-typhoon-section"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -410,6 +410,28 @@ def group_sigwx_rows_by_region(srows: list[dict]) -> list[tuple[str, list[dict]]
         other.sort(key=lambda s: str(s.get("area") or ""))
         blocks.append(("その他", other))
     return blocks
+
+
+def typhoon_product_id_norm(raw: str) -> str:
+    """台風関連 products[].id の正規化（結合 PDF 選択 UI 用）。"""
+    return re.sub(r"[^a-z0-9_]", "", str(raw).lower())
+
+
+def typhoon_product_rows(cfg_typhoon: dict) -> list[dict]:
+    """config jma_typhoon.products を結合 PDF 用チェックボックス行に展開。"""
+    prows = cfg_typhoon.get("products")
+    if not isinstance(prows, list):
+        return []
+    rows: list[dict] = []
+    for p in prows:
+        if not isinstance(p, dict):
+            continue
+        pid = typhoon_product_id_norm(str(p.get("id") or ""))
+        if not pid:
+            continue
+        lab = str(p.get("label") or p.get("name") or pid).strip() or pid
+        rows.append({"id": pid, "label": lab})
+    return rows
 
 
 def _metar_taf_pdf_font_name() -> str:
@@ -2179,6 +2201,7 @@ def expand_download_items(
     merged_taf_selection: dict | None = None,
     merged_sigwx_areas: list[str] | None = None,
     merged_detailed_sigwx_figs: list[str] | None = None,
+    merged_typhoon_ids: list[str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """
     config の items に加え、jma_weather_map が有効なら気象庁 bosai の list.json から
@@ -2191,6 +2214,9 @@ def expand_download_items(
         None は全件（config の products または従来の単一 area）。空リストは同ブロックを出さない。
 
     merged_detailed_sigwx_figs: 下層悪天予想図（詳細版）の Fig 番号（例: Fig206）のリスト。
+        None は products 全件。空リストは同ブロックを出さない。
+
+    merged_typhoon_ids: 台風関連（jma_typhoon.products）の id リスト。
         None は products 全件。空リストは同ブロックを出さない。
     """
     out: list[dict] = []
@@ -2222,6 +2248,13 @@ def expand_download_items(
             if c:
                 figs.add(c)
         detailed_fig_allow = frozenset(figs)
+    typhoon_id_allow: frozenset[str] | None = None
+    if merged_typhoon_ids is not None:
+        typhoon_id_allow = frozenset(
+            typhoon_product_id_norm(str(x))
+            for x in merged_typhoon_ids
+            if str(x).strip()
+        )
     for it in cfg.get("items") or []:
         if isinstance(it, dict):
             out.append(it)
@@ -2308,6 +2341,38 @@ def expand_download_items(
                 ),
             }
         )
+
+    typhoon = cfg.get("jma_typhoon")
+    if isinstance(typhoon, dict) and typhoon.get("enabled"):
+        tprows = typhoon.get("products")
+        if isinstance(tprows, list) and tprows:
+            for pr in tprows:
+                if not isinstance(pr, dict):
+                    continue
+                pid = typhoon_product_id_norm(str(pr.get("id") or ""))
+                if not pid:
+                    warnings.append("jma_typhoon: id なしの行をスキップしました")
+                    continue
+                if typhoon_id_allow is not None and pid not in typhoon_id_allow:
+                    continue
+                url = str(pr.get("url") or "").strip()
+                if not url:
+                    warnings.append(
+                        f"jma_typhoon ({pid}): url 未設定のためスキップしました"
+                    )
+                    continue
+                fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()
+                label = str(pr.get("label") or pr.get("name") or pid).strip()
+                comment = str(pr.get("comment") or "").strip()
+                if not comment:
+                    comment = f"台風関連資料 **{label}**（config jma_typhoon.products）"
+                out.append(
+                    {
+                        "filename": fn,
+                        "url": url,
+                        "comment": comment,
+                    }
+                )
 
     nm = cfg.get("jma_numericmap_upper")
     if isinstance(nm, dict) and nm.get("enabled"):
@@ -3163,6 +3228,7 @@ def build_merged_pdf(
     merged_taf_selection: dict | None = None,
     merged_sigwx_areas: list[str] | None = None,
     merged_detailed_sigwx_figs: list[str] | None = None,
+    merged_typhoon_ids: list[str] | None = None,
 ) -> tuple[bytes, list[str], list[str], int]:
     """
     取得対象をすべて取得し、1つの PDF に連結する。
@@ -3177,6 +3243,8 @@ def build_merged_pdf(
 
     merged_sigwx_areas / merged_detailed_sigwx_figs: 下層悪天予想図・詳細版を結合 PDF だけで絞るとき。
         省略時は expand_download_items の既定（config どおり全件）。
+
+    merged_typhoon_ids: 台風関連（jma_typhoon.products）を結合 PDF だけで絞るとき。
     """
     try:
         from pypdf import PdfReader, PdfWriter
@@ -3194,6 +3262,7 @@ def build_merged_pdf(
         merged_taf_selection=merged_taf_selection,
         merged_sigwx_areas=merged_sigwx_areas,
         merged_detailed_sigwx_figs=merged_detailed_sigwx_figs,
+        merged_typhoon_ids=merged_typhoon_ids,
     )
     warnings.extend(jma_warnings)
 
@@ -3988,6 +4057,11 @@ def page_html(cfg: dict) -> str:
     if isinstance(fs, dict) and fs.get("enabled"):
         auto_lines.append(
             "防災天気図（アジア太平洋域）の「最新24時間予想図」FSAS24 PDF（data.jma.go.jp 固定URL・取得時点の最新）"
+        )
+    typhoon = cfg.get("jma_typhoon")
+    if isinstance(typhoon, dict) and typhoon.get("enabled"):
+        auto_lines.append(
+            "台風関連（config jma_typhoon.products の id / label / filename / url）"
         )
     nm = cfg.get("jma_numericmap_upper")
     if isinstance(nm, dict) and nm.get("enabled"):

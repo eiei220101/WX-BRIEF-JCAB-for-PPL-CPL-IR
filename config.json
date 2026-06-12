@@ -37,6 +37,10 @@
     "color": true,
     "filename": "FSAS　予想地上天気図_今夜21時JST_アジア太平洋域_24h予想.pdf"
   },
+  "jma_typhoon": {
+    "enabled": true,
+    "products": []
+  },
   "jma_quickdaily_asas": {
     "enabled": true,
     "show": null,

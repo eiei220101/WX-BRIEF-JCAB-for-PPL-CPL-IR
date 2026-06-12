@@ -125,6 +125,13 @@ def _detailed_sigwx_product_rows(dsig: dict) -> list[dict]:
     return out
 
 
+def _typhoon_product_rows(cfg_typhoon: dict) -> list[dict]:
+    fn = getattr(wx, "typhoon_product_rows", None)
+    if callable(fn):
+        return fn(cfg_typhoon)
+    return []
+
+
 def _inject_wx_streamlit_ui_styles() -> None:
     """METAR 枠＝青枠線＋枠内チェックオン時も青。天気図枠＝赤枠線・チェックはテーマ既定（赤系）。生成ボタン＝青。"""
     st.markdown(
@@ -344,6 +351,38 @@ def _render_metar_taf(cfg: dict) -> None:
 
 def _render_charts_zip(cfg: dict) -> None:
     st.subheader("各種天気図・予報図")
+    typhoon_cfg = cfg.get("jma_typhoon")
+    if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
+        with st.container(border=True):
+            st.markdown("**台風関連**（結合 PDF）")
+            st.caption(
+                "台風関連資料を選び、「結合 PDF を生成」に反映されます。"
+                " 初期状態はすべてオフです。すべてオンで config の全件を含めます。"
+            )
+            trows = _typhoon_product_rows(typhoon_cfg)
+            if not trows:
+                st.info(
+                    "config の `jma_typhoon.products` に "
+                    "`id` / `label` / `filename` / `url` を追加してください。"
+                )
+            else:
+                t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
+                _region_select_all_header("merge_typhoon_selall", t_keys)
+                st.markdown(
+                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                    unsafe_allow_html=True,
+                )
+                tc = st.columns(min(3, max(1, len(trows))))
+                for i, tr in enumerate(trows):
+                    tid = tr["id"]
+                    with tc[i % len(tc)]:
+                        st.checkbox(
+                            str(tr["label"]).strip(),
+                            value=False,
+                            key=f"merge_typhoon_{tid}",
+                        )
+        st.divider()
+
     taf = cfg.get("jma_airinfo_taf")
     if isinstance(taf, dict) and taf.get("enabled"):
         st.markdown("**飛行場時系列予報**（結合 PDF に含める範囲）")
@@ -576,12 +615,31 @@ def _render_charts_zip(cfg: dict) -> None:
                     elif set(sel_fk) != set(all_fk):
                         merged_detailed_figs = sel_fk
                         use_det_kw = True
+            merged_typhoon_ids: list[str] | None = None
+            use_typhoon_kw = False
+            if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
+                trows_m = _typhoon_product_rows(typhoon_cfg)
+                if trows_m:
+                    all_tid = [r["id"] for r in trows_m]
+                    sel_tid = [
+                        tid
+                        for tid in all_tid
+                        if st.session_state.get(f"merge_typhoon_{tid}", False)
+                    ]
+                    if not sel_tid:
+                        merged_typhoon_ids = []
+                        use_typhoon_kw = True
+                    elif set(sel_tid) != set(all_tid):
+                        merged_typhoon_ids = sel_tid
+                        use_typhoon_kw = True
             if not skip_merged_pdf:
                 pdf_kw: dict = {"merged_taf_selection": merged_taf}
                 if use_sigwx_kw:
                     pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
                 if use_det_kw:
                     pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
+                if use_typhoon_kw:
+                    pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
                 with st.spinner("取得・結合中（時間がかかることがあります）…"):
                     try:
                         data, errs, warns, pages = wx.build_merged_pdf(cfg, **pdf_kw)
