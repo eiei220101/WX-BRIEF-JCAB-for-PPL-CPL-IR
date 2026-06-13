@@ -164,7 +164,7 @@ def _typhoon_product_fetch_ready(product: dict) -> bool:
 
 
 def _inject_wx_streamlit_ui_styles() -> None:
-    """METAR 枠＝青枠線＋枠内チェックオン時も青。天気図枠＝赤枠線・チェックはテーマ既定（赤系）。生成ボタン＝青。"""
+    """METAR 枠＝青、天気図枠＝赤、資料一覧枠＝緑。生成ボタン＝青。"""
     st.markdown(
         """
         <style>
@@ -178,6 +178,14 @@ def _inject_wx_streamlit_ui_styles() -> None:
           }
           .st-key-wx_charts_frame {
             border: 2px solid #dc2626 !important;
+            border-radius: 14px;
+            padding: 8px 10px 10px !important;
+            margin: 8px 2px 18px 2px !important;
+            background: transparent !important;
+            overflow: visible !important;
+          }
+          .st-key-wx_file_list_frame {
+            border: 2px solid #16a34a !important;
             border-radius: 14px;
             padding: 8px 10px 10px !important;
             margin: 8px 2px 18px 2px !important;
@@ -827,7 +835,8 @@ def main() -> None:
     with st.container(key="wx_charts_frame"):
         _render_charts_zip(cfg)
     st.divider()
-    _render_file_list(cfg)
+    with st.container(key="wx_file_list_frame"):
+        _render_file_list(cfg)
 
 
 if __name__ == "__main__":
