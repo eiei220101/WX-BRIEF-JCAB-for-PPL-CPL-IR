@@ -583,9 +583,7 @@ def _render_charts_zip(cfg: dict) -> None:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
-            wx.clear_fetch_bytes_cache()
-            _cfg_cached.clear()
-            _cached_item_bytes.clear()
+            _clear_individual_item_caches()
             cfg_live = wx.load_config()
             typhoon_cfg_live = cfg_live.get("jma_typhoon")
             sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
@@ -719,8 +717,7 @@ def _render_charts_zip(cfg: dict) -> None:
                 st.session_state["_merged_warns"] = warns
     with c2:
         if st.button("ZIP を生成", key="btn_zip"):
-            wx.clear_fetch_bytes_cache()
-            _cached_item_bytes.clear()
+            _clear_individual_item_caches()
             with st.spinner("ZIP 作成中…"):
                 zdata, errs, warns, ok = wx.build_zip(cfg)
             st.session_state["_zip"] = zdata
@@ -780,6 +777,35 @@ def _cached_item_bytes(index: int, url: str) -> tuple[bytes | None, str | None, 
     return data, fname, ""
 
 
+def _clear_individual_item_caches() -> None:
+    """個別資料ダウンロード用: 取得キャッシュと Streamlit 側キャッシュを破棄。"""
+    wx.clear_fetch_bytes_cache()
+    _cfg_cached.clear()
+    _cached_item_bytes.clear()
+
+
+def _render_individual_download_rows(items: list) -> None:
+    """展開リスト内: 各資料の取得とダウンロードボタン。"""
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        name = item.get("filename") or f"(#{idx})"
+        url = item.get("url")
+        if not url:
+            st.write(f"**{name}** （URLなし）")
+            continue
+        data, fn, err = _cached_item_bytes(idx, str(url))
+        if err:
+            st.write(f"**{name}** — {err}")
+        elif data:
+            st.download_button(
+                label=f"⬇ {name}",
+                data=data,
+                file_name=fn or name,
+                key=f"item_dl_{idx}",
+            )
+
+
 def _render_file_list(cfg: dict) -> None:
     items, warns = wx.expand_download_items(cfg)
     for w in warns:
@@ -788,25 +814,27 @@ def _render_file_list(cfg: dict) -> None:
         st.info("config.json に資料がありません。")
         return
     st.subheader("資料一覧：個別ダウンロード")
-    with st.expander("展開", expanded=False):
-        for idx, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            name = item.get("filename") or f"(#{idx})"
-            url = item.get("url")
-            if not url:
-                st.write(f"**{name}** （URLなし）")
-                continue
-            data, fn, err = _cached_item_bytes(idx, str(url))
-            if err:
-                st.write(f"**{name}** — {err}")
-            elif data:
-                st.download_button(
-                    label=f"⬇ {name}",
-                    data=data,
-                    file_name=fn or name,
-                    key=f"item_dl_{idx}",
-                )
+    btn_col, note_col = st.columns([1, 3])
+    with btn_col:
+        if st.button("最新の資料取得", type="secondary", key="btn_refresh_items"):
+            _clear_individual_item_caches()
+            st.session_state["_items_force_refresh"] = True
+            st.rerun()
+    with note_col:
+        refreshed_at = st.session_state.get("_items_refreshed_at")
+        if refreshed_at:
+            st.caption(f"最終再取得: {refreshed_at}")
+    force_refresh = bool(st.session_state.pop("_items_force_refresh", False))
+    with st.expander("展開", expanded=force_refresh):
+        if force_refresh:
+            with st.spinner("最新資料を取得中…"):
+                _render_individual_download_rows(items)
+            st.session_state["_items_refreshed_at"] = datetime.now(wx.JST).strftime(
+                "%Y-%m-%d %H:%M JST"
+            )
+            st.caption("一覧の資料を気象庁等から読み込み直しました。")
+        else:
+            _render_individual_download_rows(items)
 
 
 def main() -> None:

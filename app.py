@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-83-fetch-cache-refresh"
+PORTAL_BUILD = "20260414-84-refresh-items-btn"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2265,7 +2265,7 @@ def prefetch_status_snapshot() -> dict:
 
 def clear_fetch_bytes_cache() -> None:
     """プロセス内の資料バイト列キャッシュを破棄し、prefetch 完了扱いもリセットする。"""
-    global _PREFETCH_THREAD
+    global _PREFETCH_THREAD, _jma_list_cache, _himawari_jp_times_cache
     with _FETCH_BYTES_CACHE_LOCK:
         _FETCH_BYTES_CACHE.clear()
     with _PREFETCH_STATE_LOCK:
@@ -2274,6 +2274,8 @@ def clear_fetch_bytes_cache() -> None:
         _PREFETCH_STATE["errors"] = 0
         _PREFETCH_STATE["running"] = False
     _PREFETCH_THREAD = None
+    _jma_list_cache = None
+    _himawari_jp_times_cache = None
 
 
 def start_wx_briefing_prefetch(cfg: dict) -> None:
