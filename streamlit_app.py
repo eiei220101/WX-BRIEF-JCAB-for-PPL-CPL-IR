@@ -776,6 +776,25 @@ def _cached_item_bytes(index: int, url: str) -> tuple[bytes | None, str | None, 
     return data, fname, ""
 
 
+def _render_prefetch_status() -> None:
+    """バックグラウンド資料取得の進捗表示。"""
+    fn = getattr(wx, "prefetch_status_snapshot", None)
+    if not callable(fn):
+        return
+    pf = fn()
+    if not pf.get("running"):
+        return
+    total = int(pf.get("total") or 0)
+    done = int(pf.get("done") or 0)
+    if total <= 0:
+        st.info("資料を取得しています…（準備中）")
+        return
+    st.info(
+        f"資料を取得しています… ({done}/{total}) "
+        "完了後の個別ダウンロード・結合 PDF が速くなります。"
+    )
+
+
 def _render_file_list(cfg: dict) -> None:
     items, warns = wx.expand_download_items(cfg)
     for w in warns:
@@ -818,9 +837,13 @@ def main() -> None:
     _inject_wx_streamlit_ui_styles()
 
     cfg = _cfg_cached()
+    start_fn = getattr(wx, "start_wx_briefing_prefetch", None)
+    if callable(start_fn):
+        start_fn(cfg)
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(f"ビルド: {_wx_build_display()}　15期　Ishikawa")
+    _render_prefetch_status()
 
     with st.sidebar:
         ha = cfg.get("http_auth")

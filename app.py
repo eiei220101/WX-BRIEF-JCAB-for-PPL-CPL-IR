@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-80-playwright-win-fix"
+PORTAL_BUILD = "20260414-81-prefetch-on-access"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2188,7 +2188,141 @@ def build_hrpns_mosaic_png_bytes(opts: dict) -> bytes:
     return buf.getvalue()
 
 
-def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
+_FETCH_BYTES_CACHE: dict[str, tuple[bytes, str | None, dict]] = {}
+_FETCH_BYTES_CACHE_LOCK = threading.Lock()
+_PREFETCH_STATE: dict = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "errors": 0,
+}
+_PREFETCH_STATE_LOCK = threading.Lock()
+_PREFETCH_THREAD: threading.Thread | None = None
+
+
+def item_fetch_cache_key(item: dict) -> str:
+    """資料 item の取得結果キャッシュキー（同一 URL の wxbriefing 生成は副パラメータで区別）。"""
+    url = str(item.get("url") or "")
+    if not url:
+        return ""
+    extra = ""
+    if url.startswith(WXBRIEFING_PAGE_SCREENSHOT):
+        snap = item.get("page_screenshot")
+        if isinstance(snap, dict):
+            extra = str(snap.get("page_url") or "")
+    elif url.startswith(WXBRIEFING_HIMI_JP_MAP_SCREENSHOT):
+        snap = item.get("himawari_map_screenshot")
+        if isinstance(snap, dict):
+            extra = str(snap.get("page_url") or "")
+    elif url.startswith(WXBRIEFING_HIMI_JP_MOSAIC):
+        extra = json.dumps(item.get("himawari_mosaic") or {}, sort_keys=True, ensure_ascii=False)
+    elif url.startswith(WXBRIEFING_HRPNS_MOSAIC):
+        extra = json.dumps(item.get("hrpns_mosaic") or {}, sort_keys=True, ensure_ascii=False)
+    elif url.startswith(WXBRIEFING_AIRINFO_TAF_MERGED):
+        extra = json.dumps(
+            {
+                "icao": item.get("icao"),
+                "part1": item.get("part1"),
+                "part2": item.get("part2"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+    return f"{url}\0{extra}"
+
+
+def _capture_fetch_item_meta(item: dict) -> dict:
+    meta: dict = {}
+    fn = item.get("filename")
+    if fn:
+        meta["filename"] = str(fn)
+    lines = item.get("msc_header_lines")
+    if isinstance(lines, list) and lines:
+        meta["msc_header_lines"] = list(lines)
+    return meta
+
+
+def _apply_fetch_item_meta(item: dict, meta: dict) -> None:
+    if not isinstance(meta, dict):
+        return
+    if meta.get("filename"):
+        item["filename"] = meta["filename"]
+    if isinstance(meta.get("msc_header_lines"), list):
+        item["msc_header_lines"] = list(meta["msc_header_lines"])
+
+
+def prefetch_status_snapshot() -> dict:
+    """Streamlit 表示用の取得進捗（スナップショット）。"""
+    with _PREFETCH_STATE_LOCK:
+        return {
+            "running": bool(_PREFETCH_STATE.get("running")),
+            "total": int(_PREFETCH_STATE.get("total") or 0),
+            "done": int(_PREFETCH_STATE.get("done") or 0),
+            "errors": int(_PREFETCH_STATE.get("errors") or 0),
+        }
+
+
+def start_wx_briefing_prefetch(cfg: dict) -> None:
+    """
+    ログイン直後などに呼び出し、expand_download_items の全件をバックグラウンド取得する。
+    同一プロセスで実行中スレッドがある間は再開しない。
+    """
+    global _PREFETCH_THREAD
+    with _PREFETCH_STATE_LOCK:
+        if _PREFETCH_STATE.get("running"):
+            return
+        if _PREFETCH_THREAD is not None and _PREFETCH_THREAD.is_alive():
+            return
+        total0 = int(_PREFETCH_STATE.get("total") or 0)
+        done0 = int(_PREFETCH_STATE.get("done") or 0)
+        if total0 > 0 and done0 >= total0:
+            return
+        _PREFETCH_STATE["running"] = True
+
+    items, _warn = expand_download_items(cfg)
+    jobs = [it for it in items if isinstance(it, dict) and it.get("url")]
+
+    def _worker() -> None:
+        with _PREFETCH_STATE_LOCK:
+            _PREFETCH_STATE["total"] = len(jobs)
+            _PREFETCH_STATE["done"] = 0
+            _PREFETCH_STATE["errors"] = 0
+        if not jobs:
+            with _PREFETCH_STATE_LOCK:
+                _PREFETCH_STATE["running"] = False
+            return
+        pw_jobs = [it for it in jobs if _item_needs_playwright(it)]
+        http_jobs = [it for it in jobs if not _item_needs_playwright(it)]
+
+        def _one(it: dict) -> None:
+            try:
+                fetch_item_bytes(it)
+            except Exception:  # noqa: BLE001
+                with _PREFETCH_STATE_LOCK:
+                    _PREFETCH_STATE["errors"] = int(_PREFETCH_STATE.get("errors") or 0) + 1
+            finally:
+                with _PREFETCH_STATE_LOCK:
+                    _PREFETCH_STATE["done"] = int(_PREFETCH_STATE.get("done") or 0) + 1
+
+        for it in pw_jobs:
+            _one(it)
+        max_w = _merged_pdf_max_fetch_workers(cfg, len(http_jobs))
+        if http_jobs:
+            if max_w <= 1:
+                for it in http_jobs:
+                    _one(it)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
+                    list(ex.map(_one, http_jobs))
+        with _PREFETCH_STATE_LOCK:
+            _PREFETCH_STATE["running"] = False
+
+    th = threading.Thread(target=_worker, daemon=True, name="wx-briefing-prefetch")
+    _PREFETCH_THREAD = th
+    th.start()
+
+
+def _fetch_item_bytes_uncached(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
     """通常 URL 取得、または wxbriefing 内部生成（モザイク PNG 等）。"""
     url = item.get("url")
     if isinstance(url, str) and url.startswith(WXBRIEFING_HRPNS_MOSAIC):
@@ -2259,6 +2393,24 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
                     ctype = "image/jpeg"
                 except Exception:
                     pass
+    return data, ctype
+
+
+def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
+    """通常 URL 取得、または wxbriefing 内部生成。プロセス内キャッシュを参照。"""
+    key = item_fetch_cache_key(item)
+    if key:
+        with _FETCH_BYTES_CACHE_LOCK:
+            hit = _FETCH_BYTES_CACHE.get(key)
+        if hit is not None:
+            data, ctype, meta = hit
+            _apply_fetch_item_meta(item, meta)
+            return data, ctype
+    data, ctype = _fetch_item_bytes_uncached(item, timeout=timeout)
+    if key:
+        meta = _capture_fetch_item_meta(item)
+        with _FETCH_BYTES_CACHE_LOCK:
+            _FETCH_BYTES_CACHE[key] = (data, ctype, meta)
     return data, ctype
 
 
