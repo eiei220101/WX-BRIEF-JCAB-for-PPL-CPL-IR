@@ -581,141 +581,154 @@ def _render_charts_zip(cfg: dict) -> None:
                         )
         st.divider()
 
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns([3, 1])
     with c1:
-        if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
-            _clear_individual_item_caches()
-            cfg_live = wx.load_config()
-            typhoon_cfg_live = cfg_live.get("jma_typhoon")
-            sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
-            dsig_cfg_live = cfg_live.get("jma_airinfo_low_level_detailed_sigwx")
-            errs: list[str] = []
-            warns: list[str] = []
-            data, pages = b"", 0
-            merged_taf: dict | None = None
-            skip_merged_pdf = False
-            taf2 = cfg_live.get("jma_airinfo_taf")
-            if isinstance(taf2, dict) and taf2.get("enabled"):
-                prows2 = [
-                    p
-                    for p in (taf2.get("products") or [])
-                    if isinstance(p, dict) and str(p.get("icao") or "").strip()
-                ]
-                if prows2:
-                    all_icaos = [str(p.get("icao")).strip().upper() for p in prows2]
-                    sel = [
-                        icao
-                        for icao in all_icaos
-                        if st.session_state.get(f"merge_taf_ap_{icao}", False)
+        merge_col, refresh_col, utc_col = st.columns([2, 1, 2])
+        with merge_col:
+            if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
+                _clear_individual_item_caches()
+                cfg_live = wx.load_config()
+                typhoon_cfg_live = cfg_live.get("jma_typhoon")
+                sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
+                dsig_cfg_live = cfg_live.get("jma_airinfo_low_level_detailed_sigwx")
+                errs: list[str] = []
+                warns: list[str] = []
+                data, pages = b"", 0
+                merged_taf: dict | None = None
+                skip_merged_pdf = False
+                taf2 = cfg_live.get("jma_airinfo_taf")
+                if isinstance(taf2, dict) and taf2.get("enabled"):
+                    prows2 = [
+                        p
+                        for p in (taf2.get("products") or [])
+                        if isinstance(p, dict) and str(p.get("icao") or "").strip()
                     ]
-                    p1 = bool(st.session_state.get("merge_taf_p1", False))
-                    p2 = bool(st.session_state.get("merge_taf_p2", False))
-                    if sel and not p1 and not p2:
-                        st.warning(
-                            "飛行場時系列予報: 空港を選んだときは PART1 / PART2 の"
-                            "どちらかにチェックを入れてください。"
-                        )
-                        skip_merged_pdf = True
-                    else:
-                        full = (
-                            bool(sel)
-                            and set(sel) == set(all_icaos)
-                            and len(sel) == len(all_icaos)
-                            and p1
-                            and p2
-                        )
-                        merged_taf = None if full else {"icaos": sel, "part1": p1, "part2": p2}
-            merged_sigwx_areas: list[str] | None = None
-            use_sigwx_kw = False
-            if (
-                isinstance(sigwx_cfg_live, dict)
-                and sigwx_cfg_live.get("enabled")
-                and not str(sigwx_cfg_live.get("url") or "").strip()
-            ):
-                srows_m = _sigwx_product_rows(sigwx_cfg_live)
-                if srows_m:
-                    all_sa = [r["area"] for r in srows_m]
-                    sel_sa = [
-                        a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", False)
-                    ]
-                    if not sel_sa:
-                        merged_sigwx_areas = []
-                        use_sigwx_kw = True
-                    elif set(sel_sa) != set(all_sa):
-                        merged_sigwx_areas = sel_sa
-                        use_sigwx_kw = True
-            merged_detailed_figs: list[str] | None = None
-            use_det_kw = False
-            if isinstance(dsig_cfg_live, dict) and dsig_cfg_live.get("enabled"):
-                drows_m = _detailed_sigwx_product_rows(dsig_cfg_live)
-                if drows_m:
-                    all_fk = [r["fig_key"] for r in drows_m]
-                    sel_fk = [
-                        fk
-                        for fk in all_fk
-                        if st.session_state.get(f"merge_dsig_{fk}", False)
-                    ]
-                    if not sel_fk:
-                        merged_detailed_figs = []
-                        use_det_kw = True
-                    elif set(sel_fk) != set(all_fk):
-                        merged_detailed_figs = sel_fk
-                        use_det_kw = True
-            merged_typhoon_ids: list[str] | None = None
-            use_typhoon_kw = False
-            sel_typhoon_for_warn: list[str] = []
-            trows_m: list[dict] = []
-            if isinstance(typhoon_cfg_live, dict) and typhoon_cfg_live.get("enabled"):
-                trows_m = _typhoon_product_rows(typhoon_cfg_live)
-                if trows_m:
-                    all_tid = [r["id"] for r in trows_m]
-                    sel_tid = [
-                        tid
-                        for tid in all_tid
-                        if st.session_state.get(f"merge_typhoon_{tid}", False)
-                    ]
-                    sel_typhoon_for_warn = sel_tid
-                    if not sel_tid:
-                        merged_typhoon_ids = []
-                        use_typhoon_kw = True
-                    elif set(sel_tid) != set(all_tid):
-                        merged_typhoon_ids = sel_tid
-                        use_typhoon_kw = True
-            if not skip_merged_pdf:
-                if sel_typhoon_for_warn and trows_m:
-                    by_id = _typhoon_product_lookup(typhoon_cfg_live)
-                    no_src = [
-                        str(r["label"]).strip()
-                        for r in trows_m
-                        if r["id"] in sel_typhoon_for_warn
-                        and not _typhoon_product_fetch_ready(by_id.get(r["id"], {}))
-                    ]
-                    if no_src:
-                        st.warning(
-                            "台風関連（取得先未設定）: "
-                            + "、".join(no_src)
-                            + " — 上記のみ config.json の `jma_typhoon.products` に"
-                            " `page_url` または `url` が必要です。"
-                            " 他の項目は取得を続行します。"
-                        )
-                pdf_kw: dict = {"merged_taf_selection": merged_taf}
-                if use_sigwx_kw:
-                    pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
-                if use_det_kw:
-                    pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
-                if use_typhoon_kw:
-                    pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
-                with st.spinner("取得・結合中（時間がかかることがあります）…"):
-                    try:
-                        data, errs, warns, pages = wx.build_merged_pdf(cfg_live, **pdf_kw)
-                    except RuntimeError as e:
-                        st.error(str(e))
-                    except Exception as e:  # noqa: BLE001
-                        st.error(str(e))
-                st.session_state["_merged_pdf"] = data
-                st.session_state["_merged_pages"] = pages
-                st.session_state["_merged_errs"] = errs
-                st.session_state["_merged_warns"] = warns
+                    if prows2:
+                        all_icaos = [str(p.get("icao")).strip().upper() for p in prows2]
+                        sel = [
+                            icao
+                            for icao in all_icaos
+                            if st.session_state.get(f"merge_taf_ap_{icao}", False)
+                        ]
+                        p1 = bool(st.session_state.get("merge_taf_p1", False))
+                        p2 = bool(st.session_state.get("merge_taf_p2", False))
+                        if sel and not p1 and not p2:
+                            st.warning(
+                                "飛行場時系列予報: 空港を選んだときは PART1 / PART2 の"
+                                "どちらかにチェックを入れてください。"
+                            )
+                            skip_merged_pdf = True
+                        else:
+                            full = (
+                                bool(sel)
+                                and set(sel) == set(all_icaos)
+                                and len(sel) == len(all_icaos)
+                                and p1
+                                and p2
+                            )
+                            merged_taf = None if full else {"icaos": sel, "part1": p1, "part2": p2}
+                merged_sigwx_areas: list[str] | None = None
+                use_sigwx_kw = False
+                if (
+                    isinstance(sigwx_cfg_live, dict)
+                    and sigwx_cfg_live.get("enabled")
+                    and not str(sigwx_cfg_live.get("url") or "").strip()
+                ):
+                    srows_m = _sigwx_product_rows(sigwx_cfg_live)
+                    if srows_m:
+                        all_sa = [r["area"] for r in srows_m]
+                        sel_sa = [
+                            a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", False)
+                        ]
+                        if not sel_sa:
+                            merged_sigwx_areas = []
+                            use_sigwx_kw = True
+                        elif set(sel_sa) != set(all_sa):
+                            merged_sigwx_areas = sel_sa
+                            use_sigwx_kw = True
+                merged_detailed_figs: list[str] | None = None
+                use_det_kw = False
+                if isinstance(dsig_cfg_live, dict) and dsig_cfg_live.get("enabled"):
+                    drows_m = _detailed_sigwx_product_rows(dsig_cfg_live)
+                    if drows_m:
+                        all_fk = [r["fig_key"] for r in drows_m]
+                        sel_fk = [
+                            fk
+                            for fk in all_fk
+                            if st.session_state.get(f"merge_dsig_{fk}", False)
+                        ]
+                        if not sel_fk:
+                            merged_detailed_figs = []
+                            use_det_kw = True
+                        elif set(sel_fk) != set(all_fk):
+                            merged_detailed_figs = sel_fk
+                            use_det_kw = True
+                merged_typhoon_ids: list[str] | None = None
+                use_typhoon_kw = False
+                sel_typhoon_for_warn: list[str] = []
+                trows_m: list[dict] = []
+                if isinstance(typhoon_cfg_live, dict) and typhoon_cfg_live.get("enabled"):
+                    trows_m = _typhoon_product_rows(typhoon_cfg_live)
+                    if trows_m:
+                        all_tid = [r["id"] for r in trows_m]
+                        sel_tid = [
+                            tid
+                            for tid in all_tid
+                            if st.session_state.get(f"merge_typhoon_{tid}", False)
+                        ]
+                        sel_typhoon_for_warn = sel_tid
+                        if not sel_tid:
+                            merged_typhoon_ids = []
+                            use_typhoon_kw = True
+                        elif set(sel_tid) != set(all_tid):
+                            merged_typhoon_ids = sel_tid
+                            use_typhoon_kw = True
+                if not skip_merged_pdf:
+                    if sel_typhoon_for_warn and trows_m:
+                        by_id = _typhoon_product_lookup(typhoon_cfg_live)
+                        no_src = [
+                            str(r["label"]).strip()
+                            for r in trows_m
+                            if r["id"] in sel_typhoon_for_warn
+                            and not _typhoon_product_fetch_ready(by_id.get(r["id"], {}))
+                        ]
+                        if no_src:
+                            st.warning(
+                                "台風関連（取得先未設定）: "
+                                + "、".join(no_src)
+                                + " — 上記のみ config.json の `jma_typhoon.products` に"
+                                " `page_url` または `url` が必要です。"
+                                " 他の項目は取得を続行します。"
+                            )
+                    pdf_kw: dict = {"merged_taf_selection": merged_taf}
+                    if use_sigwx_kw:
+                        pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
+                    if use_det_kw:
+                        pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
+                    if use_typhoon_kw:
+                        pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
+                    with st.spinner("取得・結合中（時間がかかることがあります）…"):
+                        try:
+                            data, errs, warns, pages = wx.build_merged_pdf(cfg_live, **pdf_kw)
+                        except RuntimeError as e:
+                            st.error(str(e))
+                        except Exception as e:  # noqa: BLE001
+                            st.error(str(e))
+                    st.session_state["_merged_pdf"] = data
+                    st.session_state["_merged_pages"] = pages
+                    st.session_state["_merged_errs"] = errs
+                    st.session_state["_merged_warns"] = warns
+        with refresh_col:
+            if st.button("資料を更新", type="secondary", key="btn_refresh_charts"):
+                _clear_individual_item_caches()
+                st.session_state["_charts_refreshed_at_utc"] = datetime.now(wx.UTC).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+                st.rerun()
+        with utc_col:
+            charts_refreshed_at_utc = st.session_state.get("_charts_refreshed_at_utc")
+            if charts_refreshed_at_utc:
+                st.caption(f"再取得: {charts_refreshed_at_utc}")
     with c2:
         if st.button("ZIP を生成", key="btn_zip"):
             _clear_individual_item_caches()
