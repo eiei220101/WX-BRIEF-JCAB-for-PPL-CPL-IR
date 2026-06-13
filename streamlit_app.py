@@ -387,9 +387,9 @@ def _render_charts_zip(cfg: dict) -> None:
         with st.container(border=True):
             st.markdown("**台風関連**（結合 PDF）")
             st.caption(
-                "資料を選び、「結合 PDF を生成」に反映されます。"
-                " 初期状態はすべてオフです。すべてオンで config の全件を含めます。"
-                " page_url 指定の資料は Playwright でページを撮影して取り込みます。"
+                "資料を選び、「結合 PDF を生成」に反映されます。\n\n"
+                "注意：海水温は人工衛星とブイ・船舶による観測値から解析された解析図です。\n\n"
+                "気象庁の海水温図は毎日11時頃、前日の解析図を掲載されます。"
             )
             trows = _typhoon_product_rows(typhoon_cfg)
             if not trows:
