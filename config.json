@@ -39,26 +39,64 @@
   },
   "jma_typhoon": {
     "enabled": true,
+    "screenshot_defaults": {
+      "wait_ms": 14000,
+      "viewport_width": 1680,
+      "viewport_height": 980,
+      "goto_timeout_ms": 120000,
+      "device_scale_factor": 2,
+      "hide_ad_overlays": true,
+      "output_format": "jpeg"
+    },
     "products": [
       {
         "id": "track_jma",
         "label": "台風予想進路図（気象庁）",
-        "filename": "台風予想進路図_気象庁.png"
+        "filename": "台風予想進路図_気象庁.jpg",
+        "page_url": "https://www.jma.go.jp/bosai/map.html#5/38.176/137.061/&elem=root&typhoon=all&contents=typhoon",
+        "screenshot": {
+          "wait_ms": 16000,
+          "map_clip_selectors": [
+            "#contents-inner .leaflet-container",
+            ".leaflet-container"
+          ],
+          "use_dom_observation_time": true
+        }
       },
       {
         "id": "track_usn",
         "label": "台風予想進路図（米国海軍）",
-        "filename": "台風予想進路図_米国海軍.png"
+        "filename": "台風予想進路図_米国海軍.jpg"
       },
       {
         "id": "sst_jma",
         "label": "海水温（気象庁）",
-        "filename": "海水温_気象庁.png"
+        "filename": "海水温_気象庁.jpg",
+        "page_url": "https://www.data.jma.go.jp/kaiyou/data/db/kaikyo/daily/sst_HQ.html",
+        "screenshot": {
+          "wait_ms": 12000,
+          "viewport_width": 1400,
+          "viewport_height": 1000,
+          "map_clip_selectors": [
+            "img[name='img']",
+            "#main"
+          ]
+        }
       },
       {
         "id": "sst_jcg",
         "label": "海水温（海上保安庁）",
-        "filename": "海水温_海上保安庁.png"
+        "filename": "海水温_海上保安庁.jpg",
+        "page_url": "https://www1.kaiho.mlit.go.jp/KANKYO/KAIYO/qboc/temp_color/temp_color.html",
+        "screenshot": {
+          "wait_ms": 10000,
+          "viewport_width": 1200,
+          "viewport_height": 1100,
+          "map_clip_selectors": [
+            "#maincontents img",
+            "#maincontents"
+          ]
+        }
       }
     ]
   },

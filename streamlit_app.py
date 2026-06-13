@@ -358,7 +358,7 @@ def _render_charts_zip(cfg: dict) -> None:
             st.caption(
                 "資料を選び、「結合 PDF を生成」に反映されます。"
                 " 初期状態はすべてオフです。すべてオンで config の全件を含めます。"
-                " 取得 URL は `config.json` の各 product に `url` を追加してください。"
+                " page_url 指定の資料は Playwright でページを撮影して取り込みます。"
             )
             trows = _typhoon_product_rows(typhoon_cfg)
             if not trows:
@@ -638,19 +638,24 @@ def _render_charts_zip(cfg: dict) -> None:
             if not skip_merged_pdf:
                 if sel_typhoon_for_warn:
                     t_lookup = getattr(wx, "typhoon_product_lookup", None)
+                    ready_fn = getattr(wx, "typhoon_product_fetch_ready", None)
                     if callable(t_lookup):
                         by_id = t_lookup(typhoon_cfg)
-                        no_url = [
+                        no_src = [
                             str(r["label"]).strip()
                             for r in trows_m
                             if r["id"] in sel_typhoon_for_warn
-                            and not str(by_id.get(r["id"], {}).get("url") or "").strip()
+                            and not (
+                                callable(ready_fn)
+                                and ready_fn(by_id.get(r["id"], {}))
+                            )
                         ]
-                        if no_url:
+                        if no_src:
                             st.warning(
-                                "台風関連（url 未設定）: "
-                                + "、".join(no_url)
-                                + " — config.json の `jma_typhoon.products` に url を追加してください。"
+                                "台風関連（取得先未設定）: "
+                                + "、".join(no_src)
+                                + " — config.json の `jma_typhoon.products` に"
+                                " page_url または url を追加してください。"
                             )
                 pdf_kw: dict = {"merged_taf_selection": merged_taf}
                 if use_sigwx_kw:

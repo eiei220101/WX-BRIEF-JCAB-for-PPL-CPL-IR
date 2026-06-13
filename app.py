@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-77-typhoon-products"
+PORTAL_BUILD = "20260414-78-typhoon-screenshot"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -449,6 +449,29 @@ def typhoon_product_lookup(cfg_typhoon: dict) -> dict[str, dict]:
     return out
 
 
+def typhoon_product_fetch_ready(product: dict) -> bool:
+    """結合 PDF 取得可能か（直接 url または Playwright 用 page_url）。"""
+    if str(product.get("page_url") or "").strip().startswith("https://"):
+        return True
+    if str(product.get("url") or "").strip().startswith("https://"):
+        return True
+    return False
+
+
+def _merge_page_screenshot_opts(defaults: dict | None, product: dict) -> dict:
+    """jma_typhoon の screenshot_defaults と products[].screenshot / page_url を合成。"""
+    base: dict = {}
+    if isinstance(defaults, dict):
+        base.update(defaults)
+    scr = product.get("screenshot")
+    if isinstance(scr, dict):
+        base.update(scr)
+    page_url = str(product.get("page_url") or product.get("url") or "").strip()
+    if page_url:
+        base["page_url"] = page_url
+    return base
+
+
 def _metar_taf_pdf_font_name() -> str:
     """日本語を含む PDF 用（reportlab 同梱の CID フォント）。"""
     global _METAR_TAF_PDF_FONT_OK
@@ -512,6 +535,7 @@ JMA_GSI_PALE_TILE = "https://www.jma.go.jp/tile/gsi/pale"
 WXBRIEFING_HRPNS_MOSAIC = "wxbriefing://jma-nowc-hrpns-mosaic"
 WXBRIEFING_HIMI_JP_MOSAIC = "wxbriefing://jma-himi-jp-mosaic"
 WXBRIEFING_HIMI_JP_MAP_SCREENSHOT = "wxbriefing://jma-himi-map-screenshot"
+WXBRIEFING_PAGE_SCREENSHOT = "wxbriefing://page-screenshot"
 WXBRIEFING_AIRINFO_TAF_MERGED = "wxbriefing://jma-airinfo-taf-merged"
 JST = ZoneInfo("Asia/Tokyo")
 UTC = ZoneInfo("UTC")
@@ -1596,25 +1620,19 @@ def _ensure_playwright_chromium_runtime() -> None:
         _playwright_chromium_ready = True
 
 
-def build_himawari_bosai_map_screenshot_jpeg_bytes(
+def build_playwright_page_screenshot_bytes(
     opts: dict,
 ) -> tuple[bytes, datetime | None]:
     """
-    防災統合地図（map.html）を headless Chromium で開き、**地図パネル（Leaflet）中心**の JPEG を返す。
+    任意の https ページを headless Chromium で開き JPEG（既定）または PNG を返す。
 
-    戻り値の datetime はページ DOM から読んだ観測時刻（日本時間表記の解釈結果・UTC  aware）。
-    取得できたときは fetch 側でキャプションとファイル名をこれに合わせる。
-
-    既定では広告 iframe を非表示にし、``.leaflet-container`` 系セレクタで地図 DOM だけを切り出す。
-    ``device_scale_factor``（既定 2）でピクセル密度を上げ、地図部分の解像感を高める。
-
-    初回は Chromium バイナリの自動ダウンロードを試みる（Streamlit Cloud 向け）。
+    opts: page_url, wait_ms, viewport_*, map_clip_selectors, clip_selector,
+          hide_ad_overlays, use_dom_observation_time（bosai map.html のみ）,
+          full_page, output_format（jpeg|png）, device_scale_factor, goto_timeout_ms
     """
     page_url = str(opts.get("page_url") or "").strip()
-    if not page_url.startswith("https://www.jma.go.jp/bosai/map.html"):
-        raise ValueError(
-            "統合地図スクショ: page_url は https://www.jma.go.jp/bosai/map.html で始まる必要があります"
-        )
+    if not page_url.startswith("https://"):
+        raise ValueError("page_screenshot: page_url は https:// で始まる必要があります")
     wait_ms = int(opts.get("wait_ms", 12000))
     wait_ms = max(2000, min(180_000, wait_ms))
     vw = int(opts.get("viewport_width", 1440))
@@ -1632,13 +1650,16 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(
     dsf = float(opts.get("device_scale_factor", 2))
     dsf = max(1.0, min(3.0, dsf))
     hide_ads = bool(opts.get("hide_ad_overlays", True))
-    use_dom_time = bool(opts.get("use_dom_observation_time", True))
+    use_dom_time = bool(opts.get("use_dom_observation_time", False))
+    full_page = bool(opts.get("full_page"))
+    output = str(opts.get("output_format") or "jpeg").strip().lower()
+    is_bosai_map = page_url.startswith("https://www.jma.go.jp/bosai/map.html")
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
         raise ValueError(
-            "統合地図スクショには Playwright が必要です: "
+            "ページスクショには Playwright が必要です: "
             "pip install playwright および playwright install chromium を実行してください。"
         ) from e
 
@@ -1669,25 +1690,56 @@ def build_himawari_bosai_map_screenshot_jpeg_bytes(
                     pass
                 page.wait_for_timeout(600)
             obs_dom: datetime | None = None
-            if use_dom_time:
+            if use_dom_time and is_bosai_map:
                 try:
                     obs_dom = _himawari_bosai_map_read_observation_time(page)
                 except Exception:
                     obs_dom = None
-            png = _himawari_map_screenshot_element_png(
-                page,
-                clip_selector=clip_selector,
-                fallback_selectors=fallback_selectors,
-                goto_timeout=goto_timeout,
-            )
+            if full_page:
+                png = page.screenshot(type="png", full_page=True)
+            else:
+                png = _himawari_map_screenshot_element_png(
+                    page,
+                    clip_selector=clip_selector,
+                    fallback_selectors=fallback_selectors,
+                    goto_timeout=goto_timeout,
+                )
             context.close()
         finally:
             browser.close()
+
+    if output == "png":
+        return png, obs_dom
 
     im = Image.open(io.BytesIO(png)).convert("RGB")
     buf = io.BytesIO()
     im.save(buf, format="JPEG", quality=93, subsampling=0, optimize=True)
     return buf.getvalue(), obs_dom
+
+
+def build_himawari_bosai_map_screenshot_jpeg_bytes(
+    opts: dict,
+) -> tuple[bytes, datetime | None]:
+    """
+    防災統合地図（map.html）を headless Chromium で開き、**地図パネル（Leaflet）中心**の JPEG を返す。
+
+    戻り値の datetime はページ DOM から読んだ観測時刻（日本時間表記の解釈結果・UTC  aware）。
+    取得できたときは fetch 側でキャプションとファイル名をこれに合わせる。
+
+    既定では広告 iframe を非表示にし、``.leaflet-container`` 系セレクタで地図 DOM だけを切り出す。
+    ``device_scale_factor``（既定 2）でピクセル密度を上げ、地図部分の解像感を高める。
+
+    初回は Chromium バイナリの自動ダウンロードを試みる（Streamlit Cloud 向け）。
+    """
+    page_url = str(opts.get("page_url") or "").strip()
+    if not page_url.startswith("https://www.jma.go.jp/bosai/map.html"):
+        raise ValueError(
+            "統合地図スクショ: page_url は https://www.jma.go.jp/bosai/map.html で始まる必要があります"
+        )
+    snap_opts = dict(opts)
+    snap_opts.setdefault("use_dom_observation_time", True)
+    snap_opts["output_format"] = "jpeg"
+    return build_playwright_page_screenshot_bytes(snap_opts)
 
 
 def msc_himawari_japan_jpg_url_for_ref_utc(
@@ -2130,6 +2182,18 @@ def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
             )
             if fn1 != fn0:
                 item["filename"] = fn1
+    elif isinstance(url, str) and url.startswith(WXBRIEFING_PAGE_SCREENSHOT):
+        snap = item.get("page_screenshot")
+        if not isinstance(snap, dict) or not str(snap.get("page_url") or "").strip():
+            raise ValueError(
+                "ページスクショ: item に page_screenshot.page_url がありません"
+            )
+        raw_img, obs_dom = build_playwright_page_screenshot_bytes(snap)
+        out_fmt = str(snap.get("output_format") or "jpeg").strip().lower()
+        data = raw_img
+        ctype = "image/png" if out_fmt == "png" else "image/jpeg"
+        if isinstance(obs_dom, datetime) and obs_dom.tzinfo is not None:
+            item["msc_header_lines"] = _himawari_msc_header_lines_for_obs_utc(obs_dom)
     else:
         data, ctype = fetch_url(str(url), timeout=timeout)
 
@@ -2370,25 +2434,53 @@ def expand_download_items(
                     continue
                 if typhoon_id_allow is not None and pid not in typhoon_id_allow:
                     continue
-                url = str(pr.get("url") or "").strip()
-                if not url:
-                    label = str(pr.get("label") or pr.get("name") or pid).strip() or pid
-                    warnings.append(
-                        f"台風関連「{label}」: url 未設定のためスキップしました"
-                        "（config jma_typhoon.products に url を追加してください）"
+                label = str(pr.get("label") or pr.get("name") or pid).strip() or pid
+                fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()
+                comment = str(pr.get("comment") or "").strip()
+                page_url = str(pr.get("page_url") or "").strip()
+                url_direct = str(pr.get("url") or "").strip()
+                scr_flag = pr.get("screenshot")
+                use_screenshot = page_url.startswith("https://") and scr_flag is not False
+                if use_screenshot:
+                    snap_opts = _merge_page_screenshot_opts(
+                        typhoon.get("screenshot_defaults")
+                        if isinstance(typhoon.get("screenshot_defaults"), dict)
+                        else None,
+                        pr,
+                    )
+                    if not str(snap_opts.get("page_url") or "").strip():
+                        warnings.append(
+                            f"台風関連「{label}」: page_url 未設定のためスキップしました"
+                        )
+                        continue
+                    if not comment:
+                        comment = (
+                            f"台風関連 **{label}**（Playwright ページスクショ・"
+                            f"{snap_opts.get('page_url')}）"
+                        )
+                    out.append(
+                        {
+                            "filename": fn,
+                            "url": WXBRIEFING_PAGE_SCREENSHOT,
+                            "page_screenshot": snap_opts,
+                            "comment": comment,
+                        }
                     )
                     continue
-                fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()
-                label = str(pr.get("label") or pr.get("name") or pid).strip()
-                comment = str(pr.get("comment") or "").strip()
-                if not comment:
-                    comment = f"台風関連資料 **{label}**（config jma_typhoon.products）"
-                out.append(
-                    {
-                        "filename": fn,
-                        "url": url,
-                        "comment": comment,
-                    }
+                if url_direct.startswith("https://"):
+                    if not comment:
+                        comment = f"台風関連資料 **{label}**（config jma_typhoon.products）"
+                    out.append(
+                        {
+                            "filename": fn,
+                            "url": url_direct,
+                            "comment": comment,
+                        }
+                    )
+                    continue
+                warnings.append(
+                    f"台風関連「{label}」: url / page_url 未設定のためスキップしました"
+                    "（config jma_typhoon.products に追加してください）"
                 )
 
     nm = cfg.get("jma_numericmap_upper")
@@ -4078,7 +4170,7 @@ def page_html(cfg: dict) -> str:
     typhoon = cfg.get("jma_typhoon")
     if isinstance(typhoon, dict) and typhoon.get("enabled"):
         auto_lines.append(
-            "台風関連（config jma_typhoon.products の id / label / filename / url）"
+            "台風関連（config jma_typhoon.products・page_url 指定時は Playwright スクショ）"
         )
     nm = cfg.get("jma_numericmap_upper")
     if isinstance(nm, dict) and nm.get("enabled"):
