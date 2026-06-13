@@ -816,21 +816,21 @@ def _render_file_list(cfg: dict) -> None:
     st.subheader("資料一覧：個別ダウンロード")
     btn_col, note_col = st.columns([1, 3])
     with btn_col:
-        if st.button("最新の資料取得", type="secondary", key="btn_refresh_items"):
+        if st.button("資料の更新", type="secondary", key="btn_refresh_items"):
             _clear_individual_item_caches()
             st.session_state["_items_force_refresh"] = True
             st.rerun()
     with note_col:
-        refreshed_at = st.session_state.get("_items_refreshed_at")
-        if refreshed_at:
-            st.caption(f"最終再取得: {refreshed_at}")
+        refreshed_at_utc = st.session_state.get("_items_refreshed_at_utc")
+        if refreshed_at_utc:
+            st.caption(f"再取得: {refreshed_at_utc}")
     force_refresh = bool(st.session_state.pop("_items_force_refresh", False))
     with st.expander("展開", expanded=force_refresh):
         if force_refresh:
-            with st.spinner("最新資料を取得中…"):
+            with st.spinner("資料を更新中…"):
                 _render_individual_download_rows(items)
-            st.session_state["_items_refreshed_at"] = datetime.now(wx.JST).strftime(
-                "%Y-%m-%d %H:%M JST"
+            st.session_state["_items_refreshed_at_utc"] = datetime.now(wx.UTC).strftime(
+                "%Y-%m-%d %H:%M UTC"
             )
             st.caption("一覧の資料を気象庁等から読み込み直しました。")
         else:
