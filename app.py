@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-78-typhoon-screenshot"
+PORTAL_BUILD = "20260414-80-playwright-win-fix"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -570,7 +570,49 @@ _HIMI_MAP_SCREENSHOT_HIDE_ADS_JS = """
 })();
 """
 _playwright_chromium_lock = threading.Lock()
+_playwright_screenshot_lock = threading.Lock()
 _playwright_chromium_ready = False
+
+
+def _item_needs_playwright(item: dict) -> bool:
+    """結合 PDF 取得で Playwright（headless ブラウザ）が必要な item か。"""
+    url = str(item.get("url") or "")
+    return url.startswith(WXBRIEFING_PAGE_SCREENSHOT) or url.startswith(
+        WXBRIEFING_HIMI_JP_MAP_SCREENSHOT
+    )
+
+
+def _playwright_launch_chromium(p) -> object:
+    """
+    Chromium 起動。組み込み Chromium → Edge → Chrome の順で試す（Windows 向け）。
+    成功した browser インスタンスを返す（呼び出し側で close すること）。
+    """
+    errors: list[str] = []
+    attempts: list[dict] = [
+        {"headless": True},
+        {"headless": True, "channel": "msedge"},
+        {"headless": True, "channel": "chrome"},
+    ]
+    for kwargs in attempts:
+        ch = kwargs.get("channel")
+        label = f"chromium({ch})" if ch else "chromium(bundled)"
+        try:
+            return p.chromium.launch(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{label}: {e}")
+    raise RuntimeError(" / ".join(errors) if errors else "Chromium の起動に失敗しました")
+
+
+def _playwright_try_launch_once() -> tuple[bool, str]:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = _playwright_launch_chromium(p)
+            browser.close()
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
 
 
 def _header_safe_ascii(text: str, max_len: int = 2000) -> str:
@@ -1574,29 +1616,21 @@ def _ensure_playwright_chromium_runtime() -> None:
         "true",
         "yes",
     )
-    from playwright.sync_api import sync_playwright
 
     with _playwright_chromium_lock:
         if _playwright_chromium_ready:
             return
 
-        def _try_launch() -> bool:
-            try:
-                with sync_playwright() as p:
-                    b = p.chromium.launch(headless=True)
-                    b.close()
-                return True
-            except Exception:
-                return False
-
-        if _try_launch():
+        ok, detail = _playwright_try_launch_once()
+        if ok:
             _playwright_chromium_ready = True
             return
         if no_auto:
             raise ValueError(
                 "Playwright の Chromium が未配置です。環境変数 "
                 "WX_BRIEFING_PLAYWRIGHT_NO_AUTO_INSTALL=1 が付いているため自動インストールをスキップしました。"
-                " `python -m playwright install chromium` を実行するか、当該環境変数を外してください。"
+                f" 詳細: {detail} "
+                f"次を実行: {sys.executable} -m playwright install chromium"
             )
         proc = subprocess.run(
             [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -1611,11 +1645,18 @@ def _ensure_playwright_chromium_runtime() -> None:
                 " リポジトリ直下の packages.txt に Chromium 用のシステムパッケージがあるか確認し、再デプロイしてください。"
                 f" stderr末尾: {tail!r}"
             )
-        if not _try_launch():
+        ok2, detail2 = _playwright_try_launch_once()
+        if not ok2:
+            py = sys.executable
             raise ValueError(
-                "Playwright の Chromium を配置しましたが起動に失敗しました。"
-                " OS の依存ライブラリ不足の可能性があります。packages.txt を見直すか、"
-                " config の bosai_himawari_map_screenshot.enabled を false にしてタイルモザイクへ戻してください。"
+                "Playwright の Chromium を起動できませんでした。"
+                f" 詳細: {detail2 or detail}"
+                f" 次を **Streamlit と同じ Python** で実行してください:"
+                f" `{py} -m playwright install chromium`"
+                " Windows では Microsoft Edge / Google Chrome が入っていれば自動で試行します。"
+                " それでも失敗する場合は PC を再起動するか、"
+                " config の bosai_himawari_map_screenshot.enabled を false にして"
+                " 衛星画像をタイルモザイク取得に切り替えてください。"
             )
         _playwright_chromium_ready = True
 
@@ -1667,46 +1708,47 @@ def build_playwright_page_screenshot_bytes(
 
     from PIL import Image
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        try:
-            context = browser.new_context(
-                viewport={"width": vw, "height": vh},
-                user_agent=USER_AGENT,
-                locale="ja-JP",
-                device_scale_factor=dsf,
-            )
-            page = context.new_page()
-            page.goto(
-                page_url,
-                wait_until="domcontentloaded",
-                timeout=goto_timeout,
-            )
-            page.wait_for_timeout(wait_ms)
-            if hide_ads:
-                try:
-                    page.evaluate(_HIMI_MAP_SCREENSHOT_HIDE_ADS_JS)
-                except Exception:
-                    pass
-                page.wait_for_timeout(600)
-            obs_dom: datetime | None = None
-            if use_dom_time and is_bosai_map:
-                try:
-                    obs_dom = _himawari_bosai_map_read_observation_time(page)
-                except Exception:
-                    obs_dom = None
-            if full_page:
-                png = page.screenshot(type="png", full_page=True)
-            else:
-                png = _himawari_map_screenshot_element_png(
-                    page,
-                    clip_selector=clip_selector,
-                    fallback_selectors=fallback_selectors,
-                    goto_timeout=goto_timeout,
+    with _playwright_screenshot_lock:
+        with sync_playwright() as p:
+            browser = _playwright_launch_chromium(p)
+            try:
+                context = browser.new_context(
+                    viewport={"width": vw, "height": vh},
+                    user_agent=USER_AGENT,
+                    locale="ja-JP",
+                    device_scale_factor=dsf,
                 )
-            context.close()
-        finally:
-            browser.close()
+                page = context.new_page()
+                page.goto(
+                    page_url,
+                    wait_until="domcontentloaded",
+                    timeout=goto_timeout,
+                )
+                page.wait_for_timeout(wait_ms)
+                if hide_ads:
+                    try:
+                        page.evaluate(_HIMI_MAP_SCREENSHOT_HIDE_ADS_JS)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(600)
+                obs_dom: datetime | None = None
+                if use_dom_time and is_bosai_map:
+                    try:
+                        obs_dom = _himawari_bosai_map_read_observation_time(page)
+                    except Exception:
+                        obs_dom = None
+                if full_page:
+                    png = page.screenshot(type="png", full_page=True)
+                else:
+                    png = _himawari_map_screenshot_element_png(
+                        page,
+                        clip_selector=clip_selector,
+                        fallback_selectors=fallback_selectors,
+                        goto_timeout=goto_timeout,
+                    )
+                context.close()
+            finally:
+                browser.close()
 
     if output == "png":
         return png, obs_dom
@@ -3381,12 +3423,18 @@ def build_merged_pdf(
     fetch_jobs: list[tuple[int, dict]] = [
         (i, it) for i, it in enumerate(items) if isinstance(it, dict)
     ]
-    max_w = _merged_pdf_max_fetch_workers(cfg, len(fetch_jobs))
-    if max_w <= 1 or len(fetch_jobs) <= 1:
-        fetched_rows = [_merged_pdf_fetch_one(job) for job in fetch_jobs]
+    pw_jobs = [job for job in fetch_jobs if _item_needs_playwright(job[1])]
+    http_jobs = [job for job in fetch_jobs if not _item_needs_playwright(job[1])]
+    fetched_rows: list[tuple[int, dict, str, str, bytes | None, str | None, str | None]] = []
+    for job in pw_jobs:
+        fetched_rows.append(_merged_pdf_fetch_one(job))
+    max_w = _merged_pdf_max_fetch_workers(cfg, len(http_jobs))
+    if max_w <= 1 or len(http_jobs) <= 1:
+        fetched_rows.extend(_merged_pdf_fetch_one(job) for job in http_jobs)
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
-            fetched_rows = list(ex.map(_merged_pdf_fetch_one, fetch_jobs))
+            fetched_rows.extend(ex.map(_merged_pdf_fetch_one, http_jobs))
+    fetched_rows.sort(key=lambda row: row[0])
 
     for _i, item, name, kind, data, _ctype, msg in fetched_rows:
         if kind == "no_url":

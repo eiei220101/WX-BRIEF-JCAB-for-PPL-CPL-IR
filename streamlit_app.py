@@ -132,6 +132,37 @@ def _typhoon_product_rows(cfg_typhoon: dict) -> list[dict]:
     return []
 
 
+def _typhoon_product_lookup(cfg_typhoon: dict) -> dict[str, dict]:
+    fn = getattr(wx, "typhoon_product_lookup", None)
+    if callable(fn):
+        return fn(cfg_typhoon)
+    norm = getattr(wx, "typhoon_product_id_norm", None)
+    prows = cfg_typhoon.get("products")
+    if not isinstance(prows, list):
+        return {}
+    out: dict[str, dict] = {}
+    for p in prows:
+        if not isinstance(p, dict):
+            continue
+        raw_id = str(p.get("id") or "")
+        pid = norm(raw_id) if callable(norm) else raw_id.strip().lower()
+        if pid:
+            out[pid] = p
+    return out
+
+
+def _typhoon_product_fetch_ready(product: dict) -> bool:
+    """page_url / url の有無（app.py 未再起動時も Streamlit 側で判定）。"""
+    if not isinstance(product, dict):
+        return False
+    fn = getattr(wx, "typhoon_product_fetch_ready", None)
+    if callable(fn):
+        return bool(fn(product))
+    page_url = str(product.get("page_url") or "").strip()
+    url = str(product.get("url") or "").strip()
+    return page_url.startswith("https://") or url.startswith("https://")
+
+
 def _inject_wx_streamlit_ui_styles() -> None:
     """METAR 枠＝青枠線＋枠内チェックオン時も青。天気図枠＝赤枠線・チェックはテーマ既定（赤系）。生成ボタン＝青。"""
     st.markdown(
@@ -544,12 +575,17 @@ def _render_charts_zip(cfg: dict) -> None:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
+            _cfg_cached.clear()
+            cfg_live = wx.load_config()
+            typhoon_cfg_live = cfg_live.get("jma_typhoon")
+            sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
+            dsig_cfg_live = cfg_live.get("jma_airinfo_low_level_detailed_sigwx")
             errs: list[str] = []
             warns: list[str] = []
             data, pages = b"", 0
             merged_taf: dict | None = None
             skip_merged_pdf = False
-            taf2 = cfg.get("jma_airinfo_taf")
+            taf2 = cfg_live.get("jma_airinfo_taf")
             if isinstance(taf2, dict) and taf2.get("enabled"):
                 prows2 = [
                     p
@@ -583,11 +619,11 @@ def _render_charts_zip(cfg: dict) -> None:
             merged_sigwx_areas: list[str] | None = None
             use_sigwx_kw = False
             if (
-                isinstance(sigwx_cfg, dict)
-                and sigwx_cfg.get("enabled")
-                and not str(sigwx_cfg.get("url") or "").strip()
+                isinstance(sigwx_cfg_live, dict)
+                and sigwx_cfg_live.get("enabled")
+                and not str(sigwx_cfg_live.get("url") or "").strip()
             ):
-                srows_m = _sigwx_product_rows(sigwx_cfg)
+                srows_m = _sigwx_product_rows(sigwx_cfg_live)
                 if srows_m:
                     all_sa = [r["area"] for r in srows_m]
                     sel_sa = [
@@ -601,8 +637,8 @@ def _render_charts_zip(cfg: dict) -> None:
                         use_sigwx_kw = True
             merged_detailed_figs: list[str] | None = None
             use_det_kw = False
-            if isinstance(dsig_cfg, dict) and dsig_cfg.get("enabled"):
-                drows_m = _detailed_sigwx_product_rows(dsig_cfg)
+            if isinstance(dsig_cfg_live, dict) and dsig_cfg_live.get("enabled"):
+                drows_m = _detailed_sigwx_product_rows(dsig_cfg_live)
                 if drows_m:
                     all_fk = [r["fig_key"] for r in drows_m]
                     sel_fk = [
@@ -619,8 +655,9 @@ def _render_charts_zip(cfg: dict) -> None:
             merged_typhoon_ids: list[str] | None = None
             use_typhoon_kw = False
             sel_typhoon_for_warn: list[str] = []
-            if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
-                trows_m = _typhoon_product_rows(typhoon_cfg)
+            trows_m: list[dict] = []
+            if isinstance(typhoon_cfg_live, dict) and typhoon_cfg_live.get("enabled"):
+                trows_m = _typhoon_product_rows(typhoon_cfg_live)
                 if trows_m:
                     all_tid = [r["id"] for r in trows_m]
                     sel_tid = [
@@ -636,27 +673,22 @@ def _render_charts_zip(cfg: dict) -> None:
                         merged_typhoon_ids = sel_tid
                         use_typhoon_kw = True
             if not skip_merged_pdf:
-                if sel_typhoon_for_warn:
-                    t_lookup = getattr(wx, "typhoon_product_lookup", None)
-                    ready_fn = getattr(wx, "typhoon_product_fetch_ready", None)
-                    if callable(t_lookup):
-                        by_id = t_lookup(typhoon_cfg)
-                        no_src = [
-                            str(r["label"]).strip()
-                            for r in trows_m
-                            if r["id"] in sel_typhoon_for_warn
-                            and not (
-                                callable(ready_fn)
-                                and ready_fn(by_id.get(r["id"], {}))
-                            )
-                        ]
-                        if no_src:
-                            st.warning(
-                                "台風関連（取得先未設定）: "
-                                + "、".join(no_src)
-                                + " — config.json の `jma_typhoon.products` に"
-                                " page_url または url を追加してください。"
-                            )
+                if sel_typhoon_for_warn and trows_m:
+                    by_id = _typhoon_product_lookup(typhoon_cfg_live)
+                    no_src = [
+                        str(r["label"]).strip()
+                        for r in trows_m
+                        if r["id"] in sel_typhoon_for_warn
+                        and not _typhoon_product_fetch_ready(by_id.get(r["id"], {}))
+                    ]
+                    if no_src:
+                        st.warning(
+                            "台風関連（取得先未設定）: "
+                            + "、".join(no_src)
+                            + " — 上記のみ config.json の `jma_typhoon.products` に"
+                            " `page_url` または `url` が必要です。"
+                            " 他の項目は取得を続行します。"
+                        )
                 pdf_kw: dict = {"merged_taf_selection": merged_taf}
                 if use_sigwx_kw:
                     pdf_kw["merged_sigwx_areas"] = merged_sigwx_areas
@@ -666,7 +698,7 @@ def _render_charts_zip(cfg: dict) -> None:
                     pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
                 with st.spinner("取得・結合中（時間がかかることがあります）…"):
                     try:
-                        data, errs, warns, pages = wx.build_merged_pdf(cfg, **pdf_kw)
+                        data, errs, warns, pages = wx.build_merged_pdf(cfg_live, **pdf_kw)
                     except RuntimeError as e:
                         st.error(str(e))
                     except Exception as e:  # noqa: BLE001
