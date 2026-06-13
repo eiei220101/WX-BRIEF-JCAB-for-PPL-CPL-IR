@@ -583,7 +583,9 @@ def _render_charts_zip(cfg: dict) -> None:
     c1, c2 = st.columns(2)
     with c1:
         if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
+            wx.clear_fetch_bytes_cache()
             _cfg_cached.clear()
+            _cached_item_bytes.clear()
             cfg_live = wx.load_config()
             typhoon_cfg_live = cfg_live.get("jma_typhoon")
             sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
@@ -717,6 +719,8 @@ def _render_charts_zip(cfg: dict) -> None:
                 st.session_state["_merged_warns"] = warns
     with c2:
         if st.button("ZIP を生成", key="btn_zip"):
+            wx.clear_fetch_bytes_cache()
+            _cached_item_bytes.clear()
             with st.spinner("ZIP 作成中…"):
                 zdata, errs, warns, ok = wx.build_zip(cfg)
             st.session_state["_zip"] = zdata

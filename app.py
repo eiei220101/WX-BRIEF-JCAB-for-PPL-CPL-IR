@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-82-typhoon-before-fxfe502"
+PORTAL_BUILD = "20260414-83-fetch-cache-refresh"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -627,7 +627,7 @@ def load_config() -> dict:
 
 def fetch_url(url: str, timeout: int = 60) -> tuple[bytes, str | None]:
     headers = {"User-Agent": USER_AGENT}
-    if "data.jma.go.jp/mscweb/data/himawari" in url or "jma.go.jp/bosai/himawari/data/satimg" in url:
+    if "jma.go.jp" in url:
         headers["Cache-Control"] = "max-age=0, no-cache"
         headers["Pragma"] = "no-cache"
     if "jma.go.jp/bosai/himawari/data/satimg" in url:
@@ -2188,8 +2188,9 @@ def build_hrpns_mosaic_png_bytes(opts: dict) -> bytes:
     return buf.getvalue()
 
 
-_FETCH_BYTES_CACHE: dict[str, tuple[bytes, str | None, dict]] = {}
+_FETCH_BYTES_CACHE: dict[str, tuple[float, bytes, str | None, dict]] = {}
 _FETCH_BYTES_CACHE_LOCK = threading.Lock()
+FETCH_BYTES_CACHE_TTL_SEC = 600.0
 _PREFETCH_STATE: dict = {
     "running": False,
     "total": 0,
@@ -2260,6 +2261,19 @@ def prefetch_status_snapshot() -> dict:
             "done": int(_PREFETCH_STATE.get("done") or 0),
             "errors": int(_PREFETCH_STATE.get("errors") or 0),
         }
+
+
+def clear_fetch_bytes_cache() -> None:
+    """プロセス内の資料バイト列キャッシュを破棄し、prefetch 完了扱いもリセットする。"""
+    global _PREFETCH_THREAD
+    with _FETCH_BYTES_CACHE_LOCK:
+        _FETCH_BYTES_CACHE.clear()
+    with _PREFETCH_STATE_LOCK:
+        _PREFETCH_STATE["total"] = 0
+        _PREFETCH_STATE["done"] = 0
+        _PREFETCH_STATE["errors"] = 0
+        _PREFETCH_STATE["running"] = False
+    _PREFETCH_THREAD = None
 
 
 def start_wx_briefing_prefetch(cfg: dict) -> None:
@@ -2396,21 +2410,25 @@ def _fetch_item_bytes_uncached(item: dict, timeout: int = 90) -> tuple[bytes, st
     return data, ctype
 
 
-def fetch_item_bytes(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
-    """通常 URL 取得、または wxbriefing 内部生成。プロセス内キャッシュを参照。"""
+def fetch_item_bytes(item: dict, timeout: int = 90, *, use_cache: bool = True) -> tuple[bytes, str | None]:
+    """通常 URL 取得、または wxbriefing 内部生成。プロセス内キャッシュを参照（TTL あり）。"""
     key = item_fetch_cache_key(item)
-    if key:
+    if key and use_cache:
+        now = time.time()
         with _FETCH_BYTES_CACHE_LOCK:
             hit = _FETCH_BYTES_CACHE.get(key)
         if hit is not None:
-            data, ctype, meta = hit
-            _apply_fetch_item_meta(item, meta)
-            return data, ctype
+            cached_at, data, ctype, meta = hit
+            if (now - cached_at) < FETCH_BYTES_CACHE_TTL_SEC:
+                _apply_fetch_item_meta(item, meta)
+                return data, ctype
+            with _FETCH_BYTES_CACHE_LOCK:
+                _FETCH_BYTES_CACHE.pop(key, None)
     data, ctype = _fetch_item_bytes_uncached(item, timeout=timeout)
-    if key:
+    if key and use_cache:
         meta = _capture_fetch_item_meta(item)
         with _FETCH_BYTES_CACHE_LOCK:
-            _FETCH_BYTES_CACHE[key] = (data, ctype, meta)
+            _FETCH_BYTES_CACHE[key] = (time.time(), data, ctype, meta)
     return data, ctype
 
 
@@ -3384,6 +3402,7 @@ def fetch_one_expanded_item(
 
 
 def build_zip(cfg: dict) -> tuple[bytes, list[str], list[str], int]:
+    clear_fetch_bytes_cache()
     buf = io.BytesIO()
     errors: list[str] = []
     warnings: list[str] = []
@@ -3549,6 +3568,7 @@ def build_merged_pdf(
 
     merged_typhoon_ids: 台風関連（jma_typhoon.products）を結合 PDF だけで絞るとき。
     """
+    clear_fetch_bytes_cache()
     try:
         from pypdf import PdfReader, PdfWriter
         from PIL import Image  # noqa: F401 — 依存確認用
