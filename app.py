@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-81-prefetch-on-access"
+PORTAL_BUILD = "20260414-82-typhoon-before-fxfe502"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2615,68 +2615,6 @@ def expand_download_items(
             }
         )
 
-    typhoon = cfg.get("jma_typhoon")
-    if isinstance(typhoon, dict) and typhoon.get("enabled"):
-        tprows = typhoon.get("products")
-        if isinstance(tprows, list) and tprows:
-            for pr in tprows:
-                if not isinstance(pr, dict):
-                    continue
-                pid = typhoon_product_id_norm(str(pr.get("id") or ""))
-                if not pid:
-                    warnings.append("jma_typhoon: id なしの行をスキップしました")
-                    continue
-                if typhoon_id_allow is not None and pid not in typhoon_id_allow:
-                    continue
-                label = str(pr.get("label") or pr.get("name") or pid).strip() or pid
-                fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()
-                comment = str(pr.get("comment") or "").strip()
-                page_url = str(pr.get("page_url") or "").strip()
-                url_direct = str(pr.get("url") or "").strip()
-                scr_flag = pr.get("screenshot")
-                use_screenshot = page_url.startswith("https://") and scr_flag is not False
-                if use_screenshot:
-                    snap_opts = _merge_page_screenshot_opts(
-                        typhoon.get("screenshot_defaults")
-                        if isinstance(typhoon.get("screenshot_defaults"), dict)
-                        else None,
-                        pr,
-                    )
-                    if not str(snap_opts.get("page_url") or "").strip():
-                        warnings.append(
-                            f"台風関連「{label}」: page_url 未設定のためスキップしました"
-                        )
-                        continue
-                    if not comment:
-                        comment = (
-                            f"台風関連 **{label}**（Playwright ページスクショ・"
-                            f"{snap_opts.get('page_url')}）"
-                        )
-                    out.append(
-                        {
-                            "filename": fn,
-                            "url": WXBRIEFING_PAGE_SCREENSHOT,
-                            "page_screenshot": snap_opts,
-                            "comment": comment,
-                        }
-                    )
-                    continue
-                if url_direct.startswith("https://"):
-                    if not comment:
-                        comment = f"台風関連資料 **{label}**（config jma_typhoon.products）"
-                    out.append(
-                        {
-                            "filename": fn,
-                            "url": url_direct,
-                            "comment": comment,
-                        }
-                    )
-                    continue
-                warnings.append(
-                    f"台風関連「{label}」: url / page_url 未設定のためスキップしました"
-                    "（config jma_typhoon.products に追加してください）"
-                )
-
     nm = cfg.get("jma_numericmap_upper")
     if isinstance(nm, dict) and nm.get("enabled"):
         utc_h = str(nm.get("utc_hour") or "12").strip()
@@ -2985,6 +2923,68 @@ def expand_download_items(
                 ),
             }
         )
+
+    typhoon = cfg.get("jma_typhoon")
+    if isinstance(typhoon, dict) and typhoon.get("enabled"):
+        tprows = typhoon.get("products")
+        if isinstance(tprows, list) and tprows:
+            for pr in tprows:
+                if not isinstance(pr, dict):
+                    continue
+                pid = typhoon_product_id_norm(str(pr.get("id") or ""))
+                if not pid:
+                    warnings.append("jma_typhoon: id なしの行をスキップしました")
+                    continue
+                if typhoon_id_allow is not None and pid not in typhoon_id_allow:
+                    continue
+                label = str(pr.get("label") or pr.get("name") or pid).strip() or pid
+                fn = str(pr.get("filename") or f"台風関連_{pid}.bin").strip()
+                comment = str(pr.get("comment") or "").strip()
+                page_url = str(pr.get("page_url") or "").strip()
+                url_direct = str(pr.get("url") or "").strip()
+                scr_flag = pr.get("screenshot")
+                use_screenshot = page_url.startswith("https://") and scr_flag is not False
+                if use_screenshot:
+                    snap_opts = _merge_page_screenshot_opts(
+                        typhoon.get("screenshot_defaults")
+                        if isinstance(typhoon.get("screenshot_defaults"), dict)
+                        else None,
+                        pr,
+                    )
+                    if not str(snap_opts.get("page_url") or "").strip():
+                        warnings.append(
+                            f"台風関連「{label}」: page_url 未設定のためスキップしました"
+                        )
+                        continue
+                    if not comment:
+                        comment = (
+                            f"台風関連 **{label}**（Playwright ページスクショ・"
+                            f"{snap_opts.get('page_url')}）"
+                        )
+                    out.append(
+                        {
+                            "filename": fn,
+                            "url": WXBRIEFING_PAGE_SCREENSHOT,
+                            "page_screenshot": snap_opts,
+                            "comment": comment,
+                        }
+                    )
+                    continue
+                if url_direct.startswith("https://"):
+                    if not comment:
+                        comment = f"台風関連資料 **{label}**（config jma_typhoon.products）"
+                    out.append(
+                        {
+                            "filename": fn,
+                            "url": url_direct,
+                            "comment": comment,
+                        }
+                    )
+                    continue
+                warnings.append(
+                    f"台風関連「{label}」: url / page_url 未設定のためスキップしました"
+                    "（config jma_typhoon.products に追加してください）"
+                )
 
     nwp = cfg.get("jma_numericmap_nwp")
     if isinstance(nwp, dict) and nwp.get("enabled"):
