@@ -390,38 +390,6 @@ def _render_metar_taf(cfg: dict) -> None:
 
 def _render_charts_zip(cfg: dict) -> None:
     st.subheader("各種天気図・予報図")
-    typhoon_cfg = cfg.get("jma_typhoon")
-    if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
-        with st.container(border=True):
-            st.markdown("**台風関連**（結合 PDF）")
-            st.caption(
-                "資料を選び、「結合 PDF を生成」に反映されます。\n\n"
-                "注意：海水温は人工衛星とブイ・船舶による観測値から解析された解析図です。\n\n"
-                "気象庁の海水温図は毎日11時頃、前日の解析図を掲載されます。"
-            )
-            trows = _typhoon_product_rows(typhoon_cfg)
-            if not trows:
-                st.info(
-                    "config の `jma_typhoon.products` に "
-                    "`id` / `label` / `filename` を追加してください。"
-                )
-            else:
-                t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
-                _region_select_all_header("merge_typhoon_selall", t_keys)
-                st.markdown(
-                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                    unsafe_allow_html=True,
-                )
-                tc = st.columns(2)
-                for i, tr in enumerate(trows):
-                    tid = tr["id"]
-                    with tc[i % 2]:
-                        st.checkbox(
-                            str(tr["label"]).strip(),
-                            value=False,
-                            key=f"merge_typhoon_{tid}",
-                        )
-        st.divider()
 
     taf = cfg.get("jma_airinfo_taf")
     if isinstance(taf, dict) and taf.get("enabled"):
@@ -578,6 +546,39 @@ def _render_charts_zip(cfg: dict) -> None:
                                     value=False,
                                     key=f"merge_dsig_{fk}",
                                 )
+        st.divider()
+
+    typhoon_cfg = cfg.get("jma_typhoon")
+    if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
+        with st.container(border=True):
+            st.markdown("**台風関連**（結合 PDF）")
+            st.caption(
+                "資料を選び、「結合 PDF を生成」に反映されます。\n\n"
+                "注意：海水温は人工衛星とブイ・船舶による観測値から解析された解析図です。\n\n"
+                "気象庁の海水温図は毎日11時頃、前日の解析図を掲載されます。"
+            )
+            trows = _typhoon_product_rows(typhoon_cfg)
+            if not trows:
+                st.info(
+                    "config の `jma_typhoon.products` に "
+                    "`id` / `label` / `filename` を追加してください。"
+                )
+            else:
+                t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
+                _region_select_all_header("merge_typhoon_selall", t_keys)
+                st.markdown(
+                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                    unsafe_allow_html=True,
+                )
+                tc = st.columns(2)
+                for i, tr in enumerate(trows):
+                    tid = tr["id"]
+                    with tc[i % 2]:
+                        st.checkbox(
+                            str(tr["label"]).strip(),
+                            value=False,
+                            key=f"merge_typhoon_{tid}",
+                        )
         st.divider()
 
     c1, c2 = st.columns(2)
