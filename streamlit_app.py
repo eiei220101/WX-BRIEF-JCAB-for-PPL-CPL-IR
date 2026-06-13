@@ -783,7 +783,8 @@ def _render_file_list(cfg: dict) -> None:
     if not items:
         st.info("config.json に資料がありません。")
         return
-    with st.expander("資料一覧：個別ダウンロード", expanded=False):
+    st.subheader("資料一覧：個別ダウンロード")
+    with st.expander("展開", expanded=False):
         for idx, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
