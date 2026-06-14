@@ -720,10 +720,7 @@ def _render_charts_zip(cfg: dict) -> None:
                     st.session_state["_merged_warns"] = warns
         with refresh_col:
             if st.button("資料を更新", type="secondary", key="btn_refresh_charts"):
-                _clear_individual_item_caches()
-                st.session_state["_charts_refreshed_at_utc"] = datetime.now(wx.UTC).strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
+                _request_materials_refresh()
                 st.rerun()
         with utc_col:
             charts_refreshed_at_utc = st.session_state.get("_charts_refreshed_at_utc")
@@ -798,6 +795,54 @@ def _clear_individual_item_caches() -> None:
     _cached_item_bytes.clear()
 
 
+def _clear_stored_material_outputs() -> None:
+    """生成済みの結合 PDF / ZIP をセッションから削除。"""
+    for key in (
+        "_merged_pdf",
+        "_merged_pages",
+        "_merged_errs",
+        "_merged_warns",
+        "_zip",
+        "_zip_ok",
+        "_zip_errs",
+        "_zip_warns",
+    ):
+        st.session_state.pop(key, None)
+
+
+def _request_materials_refresh() -> None:
+    st.session_state["_materials_force_refresh"] = True
+
+
+def _run_materials_refresh_if_requested() -> None:
+    """「資料を更新」押下後: 取得済み資料を破棄し、全件を最初から再取得。"""
+    if not st.session_state.pop("_materials_force_refresh", False):
+        return
+    _clear_stored_material_outputs()
+    _clear_individual_item_caches()
+    refetch_fn = getattr(wx, "refetch_all_download_items", None)
+    ok, err, notes = 0, 0, []
+    with st.spinner("全資料を再取得中…（時間がかかることがあります）"):
+        if callable(refetch_fn):
+            ok, err, notes = refetch_fn(wx.load_config())
+        else:
+            wx.clear_fetch_bytes_cache()
+    ts = datetime.now(wx.UTC).strftime("%Y-%m-%d %H:%M UTC")
+    st.session_state["_charts_refreshed_at_utc"] = ts
+    st.session_state["_items_refreshed_at_utc"] = ts
+    st.session_state["_items_expanded_after_refresh"] = True
+    st.session_state["_materials_just_refetched"] = True
+    if ok or err:
+        if err:
+            st.warning(f"資料の再取得: {ok} 件成功、{err} 件失敗")
+        else:
+            st.success(f"資料の再取得: {ok} 件を更新しました（{ts}）")
+    for note in notes[:8]:
+        st.caption(f"⚠ {note}")
+    if len(notes) > 8:
+        st.caption(f"⚠ …他 {len(notes) - 8} 件")
+
+
 def _render_individual_download_rows(items: list) -> None:
     """展開リスト内: 各資料の取得とダウンロードボタン。"""
     for idx, item in enumerate(items):
@@ -831,24 +876,15 @@ def _render_file_list(cfg: dict) -> None:
     btn_col, note_col = st.columns([1, 3])
     with btn_col:
         if st.button("資料の更新", type="secondary", key="btn_refresh_items"):
-            _clear_individual_item_caches()
-            st.session_state["_items_force_refresh"] = True
+            _request_materials_refresh()
             st.rerun()
     with note_col:
         refreshed_at_utc = st.session_state.get("_items_refreshed_at_utc")
         if refreshed_at_utc:
             st.caption(f"再取得: {refreshed_at_utc}")
-    force_refresh = bool(st.session_state.pop("_items_force_refresh", False))
-    with st.expander("展開", expanded=force_refresh):
-        if force_refresh:
-            with st.spinner("資料を更新中…"):
-                _render_individual_download_rows(items)
-            st.session_state["_items_refreshed_at_utc"] = datetime.now(wx.UTC).strftime(
-                "%Y-%m-%d %H:%M UTC"
-            )
-            st.caption("一覧の資料を気象庁等から読み込み直しました。")
-        else:
-            _render_individual_download_rows(items)
+    expand_after_refresh = bool(st.session_state.pop("_items_expanded_after_refresh", False))
+    with st.expander("展開", expanded=expand_after_refresh):
+        _render_individual_download_rows(items)
 
 
 def main() -> None:
@@ -864,12 +900,16 @@ def main() -> None:
     _inject_wx_streamlit_ui_styles()
 
     cfg = _cfg_cached()
-    start_fn = getattr(wx, "start_wx_briefing_prefetch", None)
-    if callable(start_fn):
-        start_fn(cfg)
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(f"ビルド: {_wx_build_display()}　15期　Ishikawa")
+
+    _run_materials_refresh_if_requested()
+
+    if not st.session_state.pop("_materials_just_refetched", False):
+        start_fn = getattr(wx, "start_wx_briefing_prefetch", None)
+        if callable(start_fn):
+            start_fn(cfg)
 
     with st.sidebar:
         ha = cfg.get("http_auth")

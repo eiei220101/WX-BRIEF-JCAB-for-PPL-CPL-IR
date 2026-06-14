@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-85-refresh-items-utc-label"
+PORTAL_BUILD = "20260414-86-refetch-all-materials"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2336,6 +2336,69 @@ def start_wx_briefing_prefetch(cfg: dict) -> None:
     th = threading.Thread(target=_worker, daemon=True, name="wx-briefing-prefetch")
     _PREFETCH_THREAD = th
     th.start()
+
+
+def refetch_all_download_items(cfg: dict, *, timeout: int = 90) -> tuple[int, int, list[str]]:
+    """
+    キャッシュを破棄し、expand_download_items の全 URL 資料を最初から再取得する。
+    戻り値: (成功件数, 失敗件数, 警告・エラー文のリスト)
+    """
+    clear_fetch_bytes_cache()
+    expand_warnings: list[str] = []
+    items, w = expand_download_items(cfg)
+    expand_warnings.extend(w)
+    jobs = [it for it in items if isinstance(it, dict) and it.get("url")]
+    if not jobs:
+        return 0, 0, expand_warnings
+
+    def _fetch_one(it: dict) -> tuple[bool, str | None]:
+        try:
+            fetch_item_bytes(it, timeout=timeout)
+            return True, None
+        except Exception as e:  # noqa: BLE001
+            name = str(it.get("filename") or it.get("url") or "?")
+            return False, f"{name}: {e}"
+
+    ok = 0
+    err = 0
+    fetch_notes: list[str] = []
+    pw_jobs = [it for it in jobs if _item_needs_playwright(it)]
+    http_jobs = [it for it in jobs if not _item_needs_playwright(it)]
+    for it in pw_jobs:
+        success, note = _fetch_one(it)
+        if success:
+            ok += 1
+        else:
+            err += 1
+            if note:
+                fetch_notes.append(note)
+    max_w = _merged_pdf_max_fetch_workers(cfg, len(http_jobs))
+    if http_jobs:
+        if max_w <= 1 or len(http_jobs) <= 1:
+            for it in http_jobs:
+                success, note = _fetch_one(it)
+                if success:
+                    ok += 1
+                else:
+                    err += 1
+                    if note:
+                        fetch_notes.append(note)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
+                results = list(ex.map(_fetch_one, http_jobs))
+            for success, note in results:
+                if success:
+                    ok += 1
+                else:
+                    err += 1
+                    if note:
+                        fetch_notes.append(note)
+    with _PREFETCH_STATE_LOCK:
+        _PREFETCH_STATE["total"] = len(jobs)
+        _PREFETCH_STATE["done"] = len(jobs)
+        _PREFETCH_STATE["errors"] = err
+        _PREFETCH_STATE["running"] = False
+    return ok, err, expand_warnings + fetch_notes
 
 
 def _fetch_item_bytes_uncached(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
