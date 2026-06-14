@@ -332,13 +332,77 @@ def _cfg_cached():
     return wx.load_config()
 
 
+def _collect_selected_metar_taf_icaos(airports: list[dict]) -> list[str]:
+    """METAR・TAF 欄でオンになっている ICAO（福島・仙台・新潟プリセット含む）。"""
+    selected: list[str] = []
+    for ap in airports:
+        icao = str(ap.get("icao") or "").strip().upper()
+        if not icao:
+            continue
+        if st.session_state.get(f"mt_ap_{icao}", False):
+            selected.append(icao)
+    for icao in METAR_TAF_TOHOKU_FSSN_ICAOS:
+        if st.session_state.get(METAR_TAF_TOHOKU_FSSN_PRESET_KEY, False) and icao not in selected:
+            selected.append(icao)
+    return selected
+
+
+def _sync_charts_from_metar_taf_selection(cfg: dict) -> None:
+    """
+    METAR・TAF で選んだ空港に応じ、結合 PDF 用の
+    飛行場時系列予報・下層悪天予想図・詳細版のチェックを同期する。
+    """
+    fn = getattr(wx, "chart_links_for_metar_taf_icaos", None)
+    if not callable(fn):
+        return
+    airports = wx.metar_taf_airports_from_config(cfg)
+    links = fn(_collect_selected_metar_taf_icaos(airports), cfg)
+    taf_sel = set(links.get("taf_icaos") or [])
+    sigwx_sel = set(links.get("sigwx_areas") or [])
+    fig_sel = set(links.get("detailed_figs") or [])
+
+    taf = cfg.get("jma_airinfo_taf")
+    if isinstance(taf, dict) and taf.get("enabled"):
+        prows = [
+            p
+            for p in (taf.get("products") or [])
+            if isinstance(p, dict) and str(p.get("icao") or "").strip()
+        ]
+        for pr in prows:
+            icao = str(pr.get("icao")).strip().upper()
+            st.session_state[f"merge_taf_ap_{icao}"] = icao in taf_sel
+        if prows:
+            st.session_state["merge_taf_p1"] = bool(links.get("taf_part1"))
+            st.session_state["merge_taf_p2"] = bool(links.get("taf_part2"))
+
+    sig = cfg.get("jma_airinfo_low_level_sigwx")
+    if (
+        isinstance(sig, dict)
+        and sig.get("enabled")
+        and not str(sig.get("url") or "").strip()
+    ):
+        for row in _sigwx_product_rows(sig):
+            area = row["area"]
+            st.session_state[f"merge_sigwx_{area}"] = area in sigwx_sel
+
+    dsig = cfg.get("jma_airinfo_low_level_detailed_sigwx")
+    if isinstance(dsig, dict) and dsig.get("enabled"):
+        for row in _detailed_sigwx_product_rows(dsig):
+            fk = row["fig_key"]
+            st.session_state[f"merge_dsig_{fk}"] = fk in fig_sel
+
+
 def _render_metar_taf(cfg: dict) -> None:
     airports = wx.metar_taf_airports_from_config(cfg)
     block = cfg.get("metar_taf_fetch")
     if not isinstance(block, dict) or not block.get("enabled") or not airports:
         return
     st.subheader("METAR・TAF")
-    st.caption("空港と種別を選び、PDF を生成します（初期状態はすべてオフ）。")
+    st.caption(
+        "空港と種別を選び、PDF を生成します（初期状態はすべてオフ）。"
+        " 空港を選ぶと、下の「各種天気図・予報図」の飛行場時系列予報・下層悪天予想図にも"
+        " 対応する項目が自動でオンになります。"
+    )
     selected: list[str] = []
     for title, aps in wx.group_metar_taf_airports_by_region(airports):
         if not aps:
@@ -436,6 +500,7 @@ def _render_metar_taf(cfg: dict) -> None:
 
 def _render_charts_zip(cfg: dict) -> None:
     st.subheader("各種天気図・予報図")
+    _sync_charts_from_metar_taf_selection(cfg)
 
     taf = cfg.get("jma_airinfo_taf")
     if isinstance(taf, dict) and taf.get("enabled"):

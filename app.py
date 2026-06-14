@@ -45,7 +45,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-86-refetch-all-materials"
+PORTAL_BUILD = "20260414-87-metar-chart-sync"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -283,6 +283,96 @@ UI_REGION_GROUPS_SIGWX_AREA: list[dict] = [
     {"id": "tohoku_kanto", "title": "東北・関東", "areas": ("fbsn",)},
     {"id": "nishi_nihon", "title": "西日本", "areas": ("fbos",)},
 ]
+# METAR・TAF で選んだ空港 → 下層悪天予想図（詳細版）の Fig（config の products と一致）
+METAR_TAF_ICAO_DETAILED_SIGWX_FIGS: dict[str, tuple[str, ...]] = {
+    "RJSF": ("Fig206",),
+    "RJSS": ("Fig204",),
+    "RJSN": ("Fig501",),
+    "RJSC": ("Fig205",),
+    "RJSI": ("Fig203",),
+    "RJSY": ("Fig205",),
+    "RJSK": ("Fig202",),
+    "RJTU": ("Fig302",),
+    "RJAH": ("Fig301",),
+    "RJFF": ("Fig801",),
+    "RJFR": ("Fig801",),
+    "RJFA": ("Fig801",),
+    "RJFH": ("Fig801",),
+    "RJFZ": ("Fig801",),
+    "RJDM": ("Fig801",),
+    "RJFS": ("Fig805",),
+    "RJFU": ("Fig803",),
+    "RJFE": ("Fig803",),
+    "RJDT": ("Fig803",),
+    "RJDB": ("Fig803",),
+    "RJFT": ("Fig806",),
+    "RJDA": ("Fig806",),
+    "RJFO": ("Fig802",),
+    "RJFM": ("Fig807",),
+    "RJFN": ("Fig807",),
+    "RJFK": ("Fig808",),
+    "RJFY": ("Fig808",),
+    "RJFG": ("Fig808",),
+    "RJFC": ("Fig808",),
+    "RJKI": ("Fig808",),
+    "RJKA": ("Fig808",),
+    "RJKN": ("Fig808",),
+    "RJKB": ("Fig808",),
+    "RORY": ("Fig808",),
+}
+_METAR_TAF_ICAO_REGION_ID: dict[str, str] = {
+    str(code).strip().upper(): str(g.get("id") or "")
+    for g in UI_REGION_GROUPS_METAR_TAF
+    for code in (g.get("icaos") or ())
+    if str(code).strip()
+}
+# METAR・TAF の UI 地域 id → 下層悪天予想図（時系列）area（九州は西日本 fbos）
+_METAR_REGION_TO_SIGWX_AREAS: dict[str, tuple[str, ...]] = {
+    "tohoku_kanto": ("fbsn",),
+    "kyushu": ("fbos",),
+}
+
+
+def metar_taf_sigwx_areas_for_icao(icao: str) -> tuple[str, ...]:
+    """METAR・TAF 空港 ICAO に対応する下層悪天予想図（時系列）の area コード。"""
+    rid = _METAR_TAF_ICAO_REGION_ID.get(str(icao).strip().upper())
+    if not rid:
+        return ()
+    return _METAR_REGION_TO_SIGWX_AREAS.get(rid, ())
+
+
+def chart_links_for_metar_taf_icaos(icaos: list[str], cfg: dict) -> dict:
+    """
+    METAR・TAF で選択中の ICAO から、結合 PDF 用チェック状態を導出する。
+    戻り値: taf_icaos, taf_part1, taf_part2, sigwx_areas, detailed_figs
+    """
+    selected = {str(c).strip().upper() for c in icaos if str(c).strip()}
+    taf_block = cfg.get("jma_airinfo_taf")
+    taf_in_cfg: set[str] = set()
+    if isinstance(taf_block, dict):
+        for pr in taf_block.get("products") or []:
+            if not isinstance(pr, dict):
+                continue
+            code = str(pr.get("icao") or "").strip().upper()
+            if code:
+                taf_in_cfg.add(code)
+    taf_sel = sorted(selected & taf_in_cfg)
+    sigwx: set[str] = set()
+    figs: set[str] = set()
+    for code in selected:
+        for area in metar_taf_sigwx_areas_for_icao(code):
+            sigwx.add(area)
+        for raw_fig in METAR_TAF_ICAO_DETAILED_SIGWX_FIGS.get(code, ()):
+            canon = detailed_sigwx_fig_canonical(raw_fig)
+            if canon:
+                figs.add(canon)
+    return {
+        "taf_icaos": taf_sel,
+        "taf_part1": bool(taf_sel),
+        "taf_part2": bool(taf_sel),
+        "sigwx_areas": sorted(sigwx),
+        "detailed_figs": sorted(figs),
+    }
 
 
 def group_metar_taf_airports_by_region(
