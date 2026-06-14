@@ -30,6 +30,38 @@ import app as wx  # noqa: E402
 # UI 地域見出し（app.py の UI_REGION_GROUPS_* の title と一致させる）
 TOHOKU_KANTO_UI_TITLE = "東北・関東"
 KYUSHU_UI_TITLE = "九州"
+# METAR・TAF: 東北・関東のクイック選択（福島・仙台・新潟）
+METAR_TAF_TOHOKU_FSSN_ICAOS = ("RJSF", "RJSS", "RJSN")
+METAR_TAF_TOHOKU_FSSN_PRESET_KEY = "mt_tohoku_fssn"
+
+
+def _metar_taf_fssn_checkbox_keys() -> list[str]:
+    return [f"mt_ap_{icao}" for icao in METAR_TAF_TOHOKU_FSSN_ICAOS]
+
+
+def _metar_taf_fssn_preset_callback() -> None:
+    """「福島・仙台・新潟」: 3 空港の個別チェックを一括オン/オフ。"""
+    v = bool(st.session_state.get(METAR_TAF_TOHOKU_FSSN_PRESET_KEY, False))
+    for k in _metar_taf_fssn_checkbox_keys():
+        st.session_state[k] = v
+
+
+def _sync_fssn_preset_from_children() -> None:
+    """3 空港がすべてオンならプリセットもオン、1 つでもオフならプリセットもオフ。"""
+    keys = _metar_taf_fssn_checkbox_keys()
+    if not keys:
+        return
+    st.session_state[METAR_TAF_TOHOKU_FSSN_PRESET_KEY] = all(
+        bool(st.session_state.get(k, False)) for k in keys
+    )
+
+
+def _append_metar_taf_fssn_preset(selected: list[str]) -> None:
+    if not st.session_state.get(METAR_TAF_TOHOKU_FSSN_PRESET_KEY, False):
+        return
+    for icao in METAR_TAF_TOHOKU_FSSN_ICAOS:
+        if icao not in selected:
+            selected.append(icao)
 
 
 def _group_select_all_callback(sel_key: str, target_keys: list[str]):
@@ -327,6 +359,19 @@ def _render_metar_taf(cfg: dict) -> None:
                     '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
                     unsafe_allow_html=True,
                 )
+                if title == TOHOKU_KANTO_UI_TITLE:
+                    _sync_fssn_preset_from_children()
+                    st.checkbox(
+                        "福島・仙台・新潟",
+                        value=False,
+                        key=METAR_TAF_TOHOKU_FSSN_PRESET_KEY,
+                        on_change=_metar_taf_fssn_preset_callback,
+                        help="福島空港・仙台空港・新潟空港（RJSF / RJSS / RJSN）を PDF に含めます。",
+                    )
+                    st.markdown(
+                        '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                        unsafe_allow_html=True,
+                    )
                 cols = st.columns(3)
                 for i, ap in enumerate(aps):
                     icao = ap["icao"]
@@ -350,6 +395,7 @@ def _render_metar_taf(cfg: dict) -> None:
                             key=f"mt_ap_{icao}",
                         ):
                             selected.append(icao)
+    _append_metar_taf_fssn_preset(selected)
     c1, c2 = st.columns(2)
     with c1:
         want_met = st.checkbox("METAR", value=False, key="mt_met")
