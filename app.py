@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260614-89-metar-taf-hankaku-pdf"
+PORTAL_BUILD = "20260614-90-taf-becmg-newline"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -4163,8 +4163,13 @@ def _normalize_metar_taf_body_for_pdf(raw: str | None) -> str | None:
 
 
 def _format_taf_becmg_tempo_lines(raw: str | None) -> str | None:
-    """TAF 本文を PDF 用に半角・スペース区切りへ正規化（後方互換の別名）。"""
-    return _normalize_metar_taf_body_for_pdf(raw)
+    """TAF 本文を半角に正規化し、BECMG / TEMPO の直前で改行する。"""
+    t = _normalize_metar_taf_body_for_pdf(raw)
+    if not t:
+        return t
+    t = re.sub(r" (?=BECMG\b)", "\n", t, flags=re.I)
+    t = re.sub(r" (?=TEMPO\b)", "\n", t, flags=re.I)
+    return t
 
 
 def _airport_heading_para_markup(code: str, lab: str, time_bits: list[str]) -> str:
@@ -4346,7 +4351,7 @@ def build_metar_taf_pdf_bytes(
         if include_metar and include_taf:
             rows.append([Spacer(1, 1.5 * mm)])
         if include_taf:
-            taf_disp = _normalize_metar_taf_body_for_pdf(taf) if taf else None
+            taf_disp = _format_taf_becmg_tempo_lines(taf) if taf else None
             rows.append([Paragraph(_pdf_paragraph_text("TAF"), lbl_style)])
             if taf_disp:
                 rows.append(
