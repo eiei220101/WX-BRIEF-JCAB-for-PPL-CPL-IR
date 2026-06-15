@@ -36,6 +36,7 @@ from xml.sax.saxutils import escape as xml_escape
 import secrets
 import threading
 import time
+import unicodedata
 import webbrowser
 from datetime import datetime, time as dt_time, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,7 +46,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260414-88-charts-manual-check-fix"
+PORTAL_BUILD = "20260614-89-metar-taf-hankaku-pdf"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -4148,14 +4149,22 @@ def _metar_taf_ddhhmmz_to_jst_display(raw: str | None) -> str | None:
     return best.astimezone(JST).strftime("%Y/%m/%d %H:%M JST")
 
 
-def _format_taf_becmg_tempo_lines(raw: str | None) -> str | None:
-    """TAF 本文で BECMG / TEMPO の直前に改行を入れ、行頭に揃える。"""
+def _normalize_metar_taf_body_for_pdf(raw: str | None) -> str | None:
+    """PDF 表示用: 全角→半角、空白を半角スペース1個に統一してトークン区切りを揃える。"""
     if not raw:
         return raw
-    t = re.sub(r"\s+", " ", raw.strip())
-    t = re.sub(r" (?=BECMG\b)", "\n", t)
-    t = re.sub(r" (?=TEMPO\b)", "\n", t)
-    return t
+    t = unicodedata.normalize("NFKC", str(raw))
+    t = t.replace("\u3000", " ").replace("\u00a0", " ")
+    t = re.sub(r"[\r\n\t\f\v]+", " ", t)
+    t = re.sub(r"(?<=[^\s])(?=BECMG\b)", " ", t, flags=re.I)
+    t = re.sub(r"(?<=[^\s])(?=TEMPO\b)", " ", t, flags=re.I)
+    t = re.sub(r" +", " ", t).strip()
+    return t or None
+
+
+def _format_taf_becmg_tempo_lines(raw: str | None) -> str | None:
+    """TAF 本文を PDF 用に半角・スペース区切りへ正規化（後方互換の別名）。"""
+    return _normalize_metar_taf_body_for_pdf(raw)
 
 
 def _airport_heading_para_markup(code: str, lab: str, time_bits: list[str]) -> str:
@@ -4232,6 +4241,15 @@ def build_metar_taf_pdf_bytes(
         alignment=TA_LEFT,
         wordWrap="CJK",
     )
+    raw_body_style = ParagraphStyle(
+        name=f"MtRawBody_{sid}",
+        parent=styles["Code"],
+        fontName="Courier",
+        fontSize=8.5,
+        leading=11,
+        alignment=TA_LEFT,
+        wordWrap="LTR",
+    )
     sub_style = ParagraphStyle(
         name=f"MtSub_{sid}",
         parent=styles["Normal"],
@@ -4307,27 +4325,47 @@ def build_metar_taf_pdf_bytes(
         )
         if include_metar:
             rows.append([Paragraph(_pdf_paragraph_text("METAR"), lbl_style)])
-            rows.append(
-                [
-                    Paragraph(
-                        _pdf_paragraph_text(met or "（取得できませんでした）"),
-                        body_style,
-                    )
-                ]
-            )
+            if met:
+                rows.append(
+                    [
+                        Paragraph(
+                            _pdf_paragraph_text(_normalize_metar_taf_body_for_pdf(met) or met),
+                            raw_body_style,
+                        )
+                    ]
+                )
+            else:
+                rows.append(
+                    [
+                        Paragraph(
+                            _pdf_paragraph_text("（取得できませんでした）"),
+                            body_style,
+                        )
+                    ]
+                )
         if include_metar and include_taf:
             rows.append([Spacer(1, 1.5 * mm)])
         if include_taf:
-            taf_disp = _format_taf_becmg_tempo_lines(taf) if taf else None
+            taf_disp = _normalize_metar_taf_body_for_pdf(taf) if taf else None
             rows.append([Paragraph(_pdf_paragraph_text("TAF"), lbl_style)])
-            rows.append(
-                [
-                    Paragraph(
-                        _pdf_paragraph_text(taf_disp or "（取得できませんでした）"),
-                        body_style,
-                    )
-                ]
-            )
+            if taf_disp:
+                rows.append(
+                    [
+                        Paragraph(
+                            _pdf_paragraph_text(taf_disp),
+                            raw_body_style,
+                        )
+                    ]
+                )
+            else:
+                rows.append(
+                    [
+                        Paragraph(
+                            _pdf_paragraph_text("（取得できませんでした）"),
+                            body_style,
+                        )
+                    ]
+                )
 
         tbl = Table(rows, colWidths=[content_w])
         tbl.setStyle(
