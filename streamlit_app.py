@@ -351,12 +351,21 @@ def _sync_charts_from_metar_taf_selection(cfg: dict) -> None:
     """
     METAR・TAF で選んだ空港に応じ、結合 PDF 用の
     飛行場時系列予報・下層悪天予想図・詳細版のチェックを同期する。
+
+    METAR・TAF の選択が変わったときだけ実行し、
+    「各種天気図・予報図」での手動チェックは上書きしない。
     """
     fn = getattr(wx, "chart_links_for_metar_taf_icaos", None)
     if not callable(fn):
         return
     airports = wx.metar_taf_airports_from_config(cfg)
-    links = fn(_collect_selected_metar_taf_icaos(airports), cfg)
+    current = tuple(sorted(_collect_selected_metar_taf_icaos(airports)))
+    prev = st.session_state.get("_metar_taf_sync_snapshot")
+    if prev == current:
+        return
+    st.session_state["_metar_taf_sync_snapshot"] = current
+
+    links = fn(list(current), cfg)
     taf_sel = set(links.get("taf_icaos") or [])
     sigwx_sel = set(links.get("sigwx_areas") or [])
     fig_sel = set(links.get("detailed_figs") or [])
