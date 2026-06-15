@@ -525,11 +525,17 @@ def _render_metar_taf(cfg: dict) -> None:
         return
     st.subheader("METAR・TAF")
     st.caption(
-        "空港と種別を選び、PDF を生成します（初期状態はすべてオフ）。"
+        "まず METAR / TAF の種別を選び、続けて空港を選んで PDF を生成します（初期状態はすべてオフ）。"
         " 東北・関東・九州は折りたたみから展開できます。"
         " 空港を選ぶと、下の「各種天気図・予報図」の飛行場時系列予報・下層悪天予想図にも"
         " 対応する項目が自動でオンになります。"
     )
+    c1, c2 = st.columns(2)
+    with c1:
+        want_met = st.checkbox("METAR", value=False, key="mt_met")
+    with c2:
+        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
+    st.markdown("")
     selected: list[str] = []
     for title, aps in wx.group_metar_taf_airports_by_region(airports):
         if not aps:
@@ -562,11 +568,6 @@ def _render_metar_taf(cfg: dict) -> None:
                     mt_selall_key=_mt_selall_key,
                 )
     _append_metar_taf_fssn_preset(selected)
-    c1, c2 = st.columns(2)
-    with c1:
-        want_met = st.checkbox("METAR", value=False, key="mt_met")
-    with c2:
-        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
     if st.button("METAR/TAF PDF を生成", type="secondary", key="mt_go"):
         if not selected:
             st.warning("空港を1つ以上選んでください。")
