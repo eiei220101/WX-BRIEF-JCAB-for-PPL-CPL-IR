@@ -264,6 +264,32 @@ def _inject_wx_streamlit_ui_styles() -> None:
             line-height: 1.45 !important;
             margin: 0 0 0.35rem 0 !important;
           }
+          /* METAR / TAF 種別チェック: 横に寄せ・ラベル強調 */
+          .st-key-wx_metar_taf_kind_row [data-testid="stHorizontalBlock"] {
+            width: fit-content !important;
+            max-width: 100% !important;
+            gap: 0.35rem 1.1rem !important;
+            align-items: center !important;
+            margin-bottom: 0.15rem !important;
+          }
+          .st-key-wx_metar_taf_kind_row [data-testid="column"] {
+            flex: 0 0 auto !important;
+            width: auto !important;
+            min-width: 5.25rem !important;
+          }
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label p,
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label span,
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label div {
+            font-size: 1.38rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.03em !important;
+            line-height: 1.3 !important;
+          }
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
+            > span:first-of-type {
+            background-color: #2563eb !important;
+            border-color: #2563eb !important;
+          }
           .st-key-wx_metar_taf_frame {
             border: 2px solid #2563eb !important;
             border-radius: 14px;
@@ -530,12 +556,12 @@ def _render_metar_taf(cfg: dict) -> None:
         " 空港を選ぶと、下の「各種天気図・予報図」の飛行場時系列予報・下層悪天予想図にも"
         " 対応する項目が自動でオンになります。"
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        want_met = st.checkbox("METAR", value=False, key="mt_met")
-    with c2:
-        want_taf = st.checkbox("TAF", value=False, key="mt_taf")
-    st.markdown("")
+    with st.container(key="wx_metar_taf_kind_row"):
+        col_met, col_taf = st.columns(2, gap="small")
+        with col_met:
+            want_met = st.checkbox("METAR", value=False, key="mt_met")
+        with col_taf:
+            want_taf = st.checkbox("TAF", value=False, key="mt_taf")
     selected: list[str] = []
     for title, aps in wx.group_metar_taf_airports_by_region(airports):
         if not aps:
