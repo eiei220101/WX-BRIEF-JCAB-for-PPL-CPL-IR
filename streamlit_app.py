@@ -86,7 +86,7 @@ def _sync_select_all_from_children(sel_key: str, target_keys: list[str]) -> None
 def _region_title_heading(title: str) -> None:
     """地域ブロック先頭の見出し（HTML エスケープ済み）。"""
     st.markdown(
-        f'<p style="margin:0 0 0.35rem 0;"><strong>{html.escape(title)}</strong></p>',
+        f'<p class="wx-region-title"><strong>{html.escape(title)}</strong></p>',
         unsafe_allow_html=True,
     )
 
@@ -196,14 +196,77 @@ def _typhoon_product_fetch_ready(product: dict) -> bool:
 
 
 def _inject_wx_streamlit_ui_styles() -> None:
-    """METAR 枠＝青、天気図枠＝赤、資料一覧枠＝緑。生成ボタン＝青。"""
+    """METAR 枠＝青、天気図枠＝赤、資料一覧枠＝緑。生成ボタン＝青。文字サイズは読みやすめに拡大。"""
     st.markdown(
         """
         <style>
+          :root {
+            --wx-font-base: 17px;
+            --wx-font-body: 1.08rem;
+            --wx-font-caption: 1rem;
+            --wx-font-checkbox: 1.08rem;
+            --wx-font-button: 1.06rem;
+            --wx-font-subheader: 1.42rem;
+            --wx-font-region-title: 1.18rem;
+          }
+          .stApp {
+            font-size: var(--wx-font-base);
+          }
+          .stApp h1 {
+            font-size: 2.15rem !important;
+            line-height: 1.25 !important;
+          }
+          .stApp h2,
+          .stApp h3 {
+            font-size: var(--wx-font-subheader) !important;
+            line-height: 1.35 !important;
+          }
+          .stApp [data-testid="stMarkdownContainer"] p,
+          .stApp [data-testid="stMarkdownContainer"] li,
+          .stApp [data-testid="stText"] {
+            font-size: var(--wx-font-body) !important;
+            line-height: 1.55 !important;
+          }
+          .stApp [data-testid="stMarkdownContainer"] strong {
+            font-size: 1.14rem !important;
+          }
+          .stApp [data-testid="stCaptionContainer"] p,
+          .stApp [data-testid="stCaptionContainer"] {
+            font-size: var(--wx-font-caption) !important;
+            line-height: 1.5 !important;
+          }
+          .stApp [data-testid="stCheckbox"] label p,
+          .stApp [data-testid="stCheckbox"] label span,
+          .stApp [data-testid="stCheckbox"] label div {
+            font-size: var(--wx-font-checkbox) !important;
+            line-height: 1.45 !important;
+          }
+          .stApp [data-testid="stButton"] button,
+          .stApp [data-testid="stDownloadButton"] button {
+            font-size: var(--wx-font-button) !important;
+            padding: 0.5rem 1.05rem !important;
+            line-height: 1.4 !important;
+          }
+          .stApp [data-testid="stExpander"] summary p,
+          .stApp [data-testid="stExpander"] summary span {
+            font-size: 1.12rem !important;
+            line-height: 1.45 !important;
+          }
+          .stApp [data-testid="stSidebar"] {
+            font-size: var(--wx-font-base);
+          }
+          .stApp [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+            font-size: var(--wx-font-body) !important;
+          }
+          .stApp .wx-region-title {
+            font-size: var(--wx-font-region-title) !important;
+            line-height: 1.45 !important;
+            margin: 0 0 0.35rem 0 !important;
+          }
           .st-key-wx_metar_taf_frame {
             border: 2px solid #2563eb !important;
             border-radius: 14px;
-            padding: 8px 10px 10px !important;
+            padding: 10px 12px 12px !important;
             margin: 8px 2px 18px 2px !important;
             background: transparent !important;
             overflow: visible !important;
@@ -211,7 +274,7 @@ def _inject_wx_streamlit_ui_styles() -> None:
           .st-key-wx_charts_frame {
             border: 2px solid #dc2626 !important;
             border-radius: 14px;
-            padding: 8px 10px 10px !important;
+            padding: 10px 12px 12px !important;
             margin: 8px 2px 18px 2px !important;
             background: transparent !important;
             overflow: visible !important;
@@ -219,7 +282,7 @@ def _inject_wx_streamlit_ui_styles() -> None:
           .st-key-wx_file_list_frame {
             border: 2px solid #16a34a !important;
             border-radius: 14px;
-            padding: 8px 10px 10px !important;
+            padding: 10px 12px 12px !important;
             margin: 8px 2px 18px 2px !important;
             background: transparent !important;
             overflow: visible !important;
