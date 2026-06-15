@@ -264,26 +264,25 @@ def _inject_wx_streamlit_ui_styles() -> None:
             line-height: 1.45 !important;
             margin: 0 0 0.35rem 0 !important;
           }
-          /* METAR / TAF 種別チェック: 横に寄せ・ラベル強調 */
+          /* METAR / TAF 種別チェック: 横並び・ラベル強調（label p のみ。span も触ると二重表示になりやすい） */
           .st-key-wx_metar_taf_kind_row [data-testid="stHorizontalBlock"] {
             width: fit-content !important;
             max-width: 100% !important;
-            gap: 0.35rem 1.1rem !important;
+            gap: 1.75rem !important;
             align-items: center !important;
-            margin-bottom: 0.15rem !important;
+            margin-bottom: 0.35rem !important;
           }
           .st-key-wx_metar_taf_kind_row [data-testid="column"] {
             flex: 0 0 auto !important;
             width: auto !important;
-            min-width: 5.25rem !important;
+            min-width: 6.5rem !important;
           }
-          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label p,
-          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label span,
-          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label div {
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label p {
             font-size: 1.38rem !important;
             font-weight: 700 !important;
             letter-spacing: 0.03em !important;
             line-height: 1.3 !important;
+            margin: 0 !important;
           }
           .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
             > span:first-of-type {
@@ -557,7 +556,7 @@ def _render_metar_taf(cfg: dict) -> None:
         " 対応する項目が自動でオンになります。"
     )
     with st.container(key="wx_metar_taf_kind_row"):
-        col_met, col_taf = st.columns(2, gap="small")
+        col_met, col_taf = st.columns(2, gap="medium")
         with col_met:
             want_met = st.checkbox("METAR", value=False, key="mt_met")
         with col_taf:
