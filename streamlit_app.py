@@ -33,6 +33,7 @@ KYUSHU_UI_TITLE = "九州"
 # METAR・TAF: 東北・関東のクイック選択（福島・仙台・新潟）
 METAR_TAF_TOHOKU_FSSN_ICAOS = ("RJSF", "RJSS", "RJSN")
 METAR_TAF_TOHOKU_FSSN_PRESET_KEY = "mt_tohoku_fssn"
+METAR_TAF_COLLAPSIBLE_REGIONS = frozenset({TOHOKU_KANTO_UI_TITLE, KYUSHU_UI_TITLE})
 
 
 def _metar_taf_fssn_checkbox_keys() -> list[str]:
@@ -464,6 +465,59 @@ def _sync_charts_from_metar_taf_selection(cfg: dict) -> None:
             st.session_state[f"merge_dsig_{fk}"] = fk in fig_sel
 
 
+def _render_metar_taf_region_airports(
+    title: str,
+    aps: list[dict],
+    selected: list[str],
+    *,
+    mt_keys: list[str] | None,
+    mt_selall_key: str | None,
+) -> None:
+    """METAR・TAF 地域ブロック内: 全選択・プリセット・空港チェック。"""
+    if mt_keys is not None and mt_selall_key is not None:
+        _region_select_all_header(mt_selall_key, mt_keys)
+        st.markdown(
+            '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+            unsafe_allow_html=True,
+        )
+        if title == TOHOKU_KANTO_UI_TITLE:
+            _sync_fssn_preset_from_children()
+            st.checkbox(
+                "福島・仙台・新潟",
+                value=False,
+                key=METAR_TAF_TOHOKU_FSSN_PRESET_KEY,
+                on_change=_metar_taf_fssn_preset_callback,
+                help="福島空港・仙台空港・新潟空港（RJSF / RJSS / RJSN）を PDF に含めます。",
+            )
+            st.markdown(
+                '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
+                unsafe_allow_html=True,
+            )
+        cols = st.columns(3)
+        for i, ap in enumerate(aps):
+            icao = ap["icao"]
+            lab = ap["label"]
+            with cols[i % 3]:
+                if st.checkbox(
+                    f"{lab} ({icao})",
+                    value=False,
+                    key=f"mt_ap_{icao}",
+                ):
+                    selected.append(icao)
+    else:
+        cols = st.columns(3)
+        for i, ap in enumerate(aps):
+            icao = ap["icao"]
+            lab = ap["label"]
+            with cols[i % 3]:
+                if st.checkbox(
+                    f"{lab} ({icao})",
+                    value=False,
+                    key=f"mt_ap_{icao}",
+                ):
+                    selected.append(icao)
+
+
 def _render_metar_taf(cfg: dict) -> None:
     airports = wx.metar_taf_airports_from_config(cfg)
     block = cfg.get("metar_taf_fetch")
@@ -472,6 +526,7 @@ def _render_metar_taf(cfg: dict) -> None:
     st.subheader("METAR・TAF")
     st.caption(
         "空港と種別を選び、PDF を生成します（初期状態はすべてオフ）。"
+        " 東北・関東・九州は折りたたみから展開できます。"
         " 空港を選ぶと、下の「各種天気図・予報図」の飛行場時系列予報・下層悪天予想図にも"
         " 対応する項目が自動でオンになります。"
     )
@@ -487,50 +542,25 @@ def _render_metar_taf(cfg: dict) -> None:
         elif title == KYUSHU_UI_TITLE:
             _mt_keys = [f"mt_ap_{str(ap['icao']).strip()}" for ap in aps]
             _mt_selall_key = "mt_selall_kyushu"
-        with st.container(border=True):
-            _region_title_heading(title)
-            if _mt_keys is not None and _mt_selall_key is not None:
-                _region_select_all_header(_mt_selall_key, _mt_keys)
-                st.markdown(
-                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                    unsafe_allow_html=True,
+        if title in METAR_TAF_COLLAPSIBLE_REGIONS:
+            with st.expander(title, expanded=False):
+                _render_metar_taf_region_airports(
+                    title,
+                    aps,
+                    selected,
+                    mt_keys=_mt_keys,
+                    mt_selall_key=_mt_selall_key,
                 )
-                if title == TOHOKU_KANTO_UI_TITLE:
-                    _sync_fssn_preset_from_children()
-                    st.checkbox(
-                        "福島・仙台・新潟",
-                        value=False,
-                        key=METAR_TAF_TOHOKU_FSSN_PRESET_KEY,
-                        on_change=_metar_taf_fssn_preset_callback,
-                        help="福島空港・仙台空港・新潟空港（RJSF / RJSS / RJSN）を PDF に含めます。",
-                    )
-                    st.markdown(
-                        '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                        unsafe_allow_html=True,
-                    )
-                cols = st.columns(3)
-                for i, ap in enumerate(aps):
-                    icao = ap["icao"]
-                    lab = ap["label"]
-                    with cols[i % 3]:
-                        if st.checkbox(
-                            f"{lab} ({icao})",
-                            value=False,
-                            key=f"mt_ap_{icao}",
-                        ):
-                            selected.append(icao)
-            else:
-                cols = st.columns(3)
-                for i, ap in enumerate(aps):
-                    icao = ap["icao"]
-                    lab = ap["label"]
-                    with cols[i % 3]:
-                        if st.checkbox(
-                            f"{lab} ({icao})",
-                            value=False,
-                            key=f"mt_ap_{icao}",
-                        ):
-                            selected.append(icao)
+        else:
+            with st.container(border=True):
+                _region_title_heading(title)
+                _render_metar_taf_region_airports(
+                    title,
+                    aps,
+                    selected,
+                    mt_keys=_mt_keys,
+                    mt_selall_key=_mt_selall_key,
+                )
     _append_metar_taf_fssn_preset(selected)
     c1, c2 = st.columns(2)
     with c1:
