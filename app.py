@@ -31,7 +31,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
-from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from xml.sax.saxutils import escape as xml_escape
 import secrets
 import threading
@@ -46,7 +46,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260614-90-taf-becmg-newline"
+PORTAL_BUILD = "20260614-91-metar-taf-keep-together"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -4386,8 +4386,7 @@ def build_metar_taf_pdf_bytes(
                 ]
             )
         )
-        airport_tables.append(tbl)
-        airport_tables.append(Spacer(1, 3.5 * mm))
+        airport_tables.append(KeepTogether([tbl, Spacer(1, 3.5 * mm)]))
 
     story: list = []
     story.append(Paragraph(_pdf_paragraph_text("METAR・TAF"), title_style))
