@@ -275,7 +275,10 @@ def _inject_wx_streamlit_ui_styles() -> None:
           .st-key-wx_metar_taf_kind_row [data-testid="column"] {
             flex: 0 0 auto !important;
             width: auto !important;
-            min-width: 6.5rem !important;
+            min-width: auto !important;
+          }
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label {
+            white-space: nowrap !important;
           }
           .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] label p {
             font-size: 1.38rem !important;
@@ -283,6 +286,10 @@ def _inject_wx_streamlit_ui_styles() -> None:
             letter-spacing: 0.03em !important;
             line-height: 1.3 !important;
             margin: 0 !important;
+            white-space: nowrap !important;
+          }
+          .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] [data-testid="stMarkdownContainer"] p {
+            white-space: nowrap !important;
           }
           .st-key-wx_metar_taf_kind_row [data-testid="stCheckbox"] [data-baseweb="checkbox"]:has(input:checked)
             > span:first-of-type {
