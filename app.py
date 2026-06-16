@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260616-97-coastline-overlay-off"
+PORTAL_BUILD = "20260616-98-merged-pdf-cache-reuse"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2642,6 +2642,94 @@ def _merged_pdf_max_fetch_workers(cfg: dict, n_jobs: int) -> int:
     return w
 
 
+def _merged_pdf_process_workers(cfg: dict, n_jobs: int) -> int:
+    """結合 PDF: 画像→PDF 変換など後処理の並列度（既定 4、1〜8）。"""
+    raw = None
+    block = cfg.get("merged_pdf")
+    if isinstance(block, dict):
+        raw = block.get("process_workers")
+    try:
+        w = int(raw) if raw is not None else 4
+    except (TypeError, ValueError):
+        w = 4
+    w = max(1, min(8, w))
+    if n_jobs > 0:
+        w = min(w, n_jobs)
+    return w
+
+
+def _merged_pdf_item_to_pdf_bytes(
+    row: tuple[int, dict, str, str, bytes | None, str | None, str | None],
+) -> tuple[int, bytes | None, list[str], list[str]]:
+    """取得済み 1 件を結合 PDF 用の PDF バイト列に変換する。"""
+    i, item, name, kind, data, _ctype, msg = row
+    errors: list[str] = []
+    warnings: list[str] = []
+    if kind == "no_url":
+        if msg:
+            errors.append(msg)
+        return i, None, errors, warnings
+    if kind == "svg":
+        if msg:
+            warnings.append(msg)
+        return i, None, errors, warnings
+    if kind == "err":
+        if msg:
+            errors.append(msg)
+        return i, None, errors, warnings
+    if kind != "ok" or data is None:
+        return i, None, errors, warnings
+
+    low = name.lower()
+    try:
+        if low.endswith(".pdf"):
+            overlay_spec = item.get("coastline_overlay")
+            if isinstance(overlay_spec, dict) and overlay_spec.get("png"):
+                try:
+                    data = _apply_coastline_overlay_to_pdf_bytes(data, overlay_spec)
+                except Exception as e:  # noqa: BLE001
+                    warnings.append(f"{name}: 海岸線オーバーレイ失敗 {e}")
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(data))
+            if len(reader.pages) == 0:
+                warnings.append(f"{name}: PDF にページがありません")
+                return i, None, errors, warnings
+            return i, data, errors, warnings
+        if low.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")):
+            dpi = float(item.get("pdf_image_resolution") or 100)
+            up = item.get("pdf_upscale_long_edge")
+            up_i: int | None
+            if up is None:
+                up_i = None
+            else:
+                up_i = int(up)
+                if up_i <= 0:
+                    up_i = None
+            if item.get("pdf_a4_fit"):
+                a4_dpi = float(item.get("pdf_a4_dpi") or 200)
+                a4_mm = float(item.get("pdf_a4_margin_mm") or 5)
+                pdf_one = _image_bytes_to_single_page_pdf_a4(
+                    data,
+                    resolution=a4_dpi,
+                    upscale_long_edge=up_i,
+                    margin_mm=a4_mm,
+                )
+            else:
+                pdf_one = _image_bytes_to_single_page_pdf(
+                    data,
+                    resolution=dpi,
+                    upscale_long_edge=up_i,
+                )
+            return i, pdf_one, errors, warnings
+        warnings.append(
+            f"{name}: 拡張子が PDF/画像以外のためスキップしました（結合は .pdf .png .jpg .gif 等のみ）"
+        )
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"{name}: PDF 結合処理エラー {e}")
+    return i, None, errors, warnings
+
+
 def _merged_pdf_fetch_one(ix_item: tuple[int, dict]) -> tuple[int, dict, str, str, bytes | None, str | None, str | None]:
     """
     結合 PDF 用の 1 件取得。戻り値:
@@ -4063,8 +4151,10 @@ def build_merged_pdf(
         省略時は expand_download_items の既定（config どおり全件）。
 
     merged_typhoon_ids: 台風関連（jma_typhoon.products）を結合 PDF だけで絞るとき。
+
+    起動時 prefetch や「資料の更新」で温めた取得キャッシュ（TTL 約10分）を再利用する。
+    毎回キャッシュを破棄しないため、2回目以降の生成は大幅に短くなることが多い。
     """
-    clear_fetch_bytes_cache()
     try:
         from pypdf import PdfReader, PdfWriter
         from PIL import Image  # noqa: F401 — 依存確認用
@@ -4104,75 +4194,41 @@ def build_merged_pdf(
             fetched_rows.extend(ex.map(_merged_pdf_fetch_one, http_jobs))
     fetched_rows.sort(key=lambda row: row[0])
 
-    for _i, item, name, kind, data, _ctype, msg in fetched_rows:
-        if kind == "no_url":
-            if msg:
+    ok_rows = [row for row in fetched_rows if row[3] == "ok" and row[4] is not None]
+    proc_w = _merged_pdf_process_workers(cfg, len(ok_rows))
+    if proc_w <= 1 or len(ok_rows) <= 1:
+        materialized = [_merged_pdf_item_to_pdf_bytes(row) for row in ok_rows]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=proc_w) as ex:
+            materialized = list(ex.map(_merged_pdf_item_to_pdf_bytes, ok_rows))
+    materialized.sort(key=lambda row: row[0])
+    materialized_by_ix = {row[0]: row for row in materialized}
+
+    for row in fetched_rows:
+        i = row[0]
+        if row[3] != "ok":
+            _i, _item, _name, kind, _data, _ctype, msg = row
+            if kind == "no_url" and msg:
                 errors.append(msg)
-            continue
-        if kind == "svg":
-            if msg:
+            elif kind == "svg" and msg:
                 warnings.append(msg)
-            continue
-        if kind == "err":
-            if msg:
+            elif kind == "err" and msg:
                 errors.append(msg)
             continue
-        if kind != "ok" or data is None:
+        mat = materialized_by_ix.get(i)
+        if mat is None:
             continue
-
-        low = name.lower()
-
+        _i, pdf_bytes, row_errs, row_warns = mat
+        errors.extend(row_errs)
+        warnings.extend(row_warns)
+        if not pdf_bytes:
+            continue
         try:
-            if low.endswith(".pdf"):
-                overlay_spec = item.get("coastline_overlay")
-                if isinstance(overlay_spec, dict) and overlay_spec.get("png"):
-                    try:
-                        data = _apply_coastline_overlay_to_pdf_bytes(data, overlay_spec)
-                    except Exception as e:  # noqa: BLE001
-                        warnings.append(f"{name}: 海岸線オーバーレイ失敗 {e}")
-                reader = PdfReader(io.BytesIO(data))
-                n = len(reader.pages)
-                if n == 0:
-                    warnings.append(f"{name}: PDF にページがありません")
-                writer.append_pages_from_reader(reader)
-                pages_added += n
-            elif low.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")):
-                try:
-                    dpi = float(item.get("pdf_image_resolution") or 100)
-                    up = item.get("pdf_upscale_long_edge")
-                    up_i: int | None
-                    if up is None:
-                        up_i = None
-                    else:
-                        up_i = int(up)
-                        if up_i <= 0:
-                            up_i = None
-                    if item.get("pdf_a4_fit"):
-                        a4_dpi = float(item.get("pdf_a4_dpi") or 200)
-                        a4_mm = float(item.get("pdf_a4_margin_mm") or 5)
-                        pdf_one = _image_bytes_to_single_page_pdf_a4(
-                            data,
-                            resolution=a4_dpi,
-                            upscale_long_edge=up_i,
-                            margin_mm=a4_mm,
-                        )
-                    else:
-                        pdf_one = _image_bytes_to_single_page_pdf(
-                            data,
-                            resolution=dpi,
-                            upscale_long_edge=up_i,
-                        )
-                except Exception as e:  # noqa: BLE001
-                    errors.append(f"{name}: 画像→PDF 変換失敗 {e}")
-                    continue
-                reader = PdfReader(io.BytesIO(pdf_one))
-                writer.append_pages_from_reader(reader)
-                pages_added += len(reader.pages)
-            else:
-                warnings.append(
-                    f"{name}: 拡張子が PDF/画像以外のためスキップしました（結合は .pdf .png .jpg .gif 等のみ）"
-                )
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            writer.append(reader)
+            pages_added += len(reader.pages)
         except Exception as e:  # noqa: BLE001
+            name = str(row[2])
             errors.append(f"{name}: PDF 結合処理エラー {e}")
 
     if pages_added == 0:

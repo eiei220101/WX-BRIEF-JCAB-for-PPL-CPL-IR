@@ -10,7 +10,8 @@
   },
   "open_browser": true,
   "merged_pdf": {
-    "fetch_workers": 8
+    "fetch_workers": 12,
+    "process_workers": 4
   },
   "items": [
     {
