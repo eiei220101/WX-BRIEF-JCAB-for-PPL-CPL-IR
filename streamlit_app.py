@@ -436,6 +436,18 @@ def _render_runtime_sidebar() -> None:
             st.caption(
                 f"海岸線オーバーレイ: {'OK' if ok else 'NG'} — {diag.get('coastline_overlay_png')}"
             )
+        bg_fn = getattr(wx, "background_refresh_snapshot", None)
+        if callable(bg_fn):
+            bg = bg_fn()
+            if bg.get("scheduler_running"):
+                iv = bg.get("interval_minutes") or "?"
+                st.caption(f"自動更新: {iv} 分ごと（バックグラウンド）")
+                if bg.get("refresh_running"):
+                    st.caption("いま資料を自動取得中…")
+                if bg.get("last_refresh_utc"):
+                    st.caption(f"最終自動取得: {bg['last_refresh_utc']}")
+                if bg.get("last_merged_pdf_utc"):
+                    st.caption(f"結合PDF温め: {bg['last_merged_pdf_utc']}")
         st.caption(
             "変更が反映されないとき: ①上の app.py パスが編集したフォルダか "
             "②結合PDFを再生成したか ③Streamlit を再起動したか を確認。"
@@ -905,7 +917,6 @@ def _render_charts_zip(cfg: dict) -> None:
         merge_col, refresh_col, utc_col = st.columns([2, 1, 2])
         with merge_col:
             if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
-                _clear_individual_item_caches()
                 cfg_live = wx.load_config()
                 typhoon_cfg_live = cfg_live.get("jma_typhoon")
                 sigwx_cfg_live = cfg_live.get("jma_airinfo_low_level_sigwx")
@@ -1026,9 +1037,10 @@ def _render_charts_zip(cfg: dict) -> None:
                         pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
                     if use_typhoon_kw:
                         pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
-                    with st.spinner("取得・結合中（時間がかかることがあります）…"):
+                    build_fn = getattr(wx, "build_merged_pdf_cached", None) or wx.build_merged_pdf
+                    with st.spinner("取得・結合中（キャッシュがあれば数秒）…"):
                         try:
-                            data, errs, warns, pages = wx.build_merged_pdf(cfg_live, **pdf_kw)
+                            data, errs, warns, pages = build_fn(cfg_live, **pdf_kw)
                         except RuntimeError as e:
                             st.error(str(e))
                         except Exception as e:  # noqa: BLE001
@@ -1237,9 +1249,13 @@ def main() -> None:
     _run_materials_refresh_if_requested()
 
     if not st.session_state.pop("_materials_just_refetched", False):
-        start_fn = getattr(wx, "start_wx_briefing_prefetch", None)
-        if callable(start_fn):
-            start_fn(cfg)
+        sched_fn = getattr(wx, "start_wx_briefing_background_scheduler", None)
+        if callable(sched_fn):
+            sched_fn(cfg)
+        else:
+            start_fn = getattr(wx, "start_wx_briefing_prefetch", None)
+            if callable(start_fn):
+                start_fn(cfg)
 
     with st.sidebar:
         _render_runtime_sidebar()

@@ -11,7 +11,10 @@
   "open_browser": true,
   "merged_pdf": {
     "fetch_workers": 12,
-    "process_workers": 4
+    "process_workers": 4,
+    "background_refresh_minutes": 30,
+    "prebuild_merged_pdf": true,
+    "merged_pdf_cache_ttl_minutes": 40
   },
   "items": [
     {

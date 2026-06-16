@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260616-98-merged-pdf-cache-reuse"
+PORTAL_BUILD = "20260616-99-background-refresh-30m"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2314,7 +2314,7 @@ def build_hrpns_mosaic_png_bytes(opts: dict) -> bytes:
 
 _FETCH_BYTES_CACHE: dict[str, tuple[float, bytes, str | None, dict]] = {}
 _FETCH_BYTES_CACHE_LOCK = threading.Lock()
-FETCH_BYTES_CACHE_TTL_SEC = 600.0
+FETCH_BYTES_CACHE_TTL_SEC = 2400.0
 _PREFETCH_STATE: dict = {
     "running": False,
     "total": 0,
@@ -2323,6 +2323,18 @@ _PREFETCH_STATE: dict = {
 }
 _PREFETCH_STATE_LOCK = threading.Lock()
 _PREFETCH_THREAD: threading.Thread | None = None
+_BACKGROUND_STATE: dict = {
+    "scheduler_running": False,
+    "refresh_running": False,
+    "last_refresh_utc": "",
+    "last_merged_pdf_utc": "",
+    "interval_minutes": 0,
+}
+_BACKGROUND_STATE_LOCK = threading.Lock()
+_BACKGROUND_REFRESH_LOCK = threading.Lock()
+_SCHEDULER_THREAD: threading.Thread | None = None
+_MERGED_PDF_READY_CACHE: dict[str, tuple[float, bytes, list[str], list[str], int]] = {}
+_MERGED_PDF_READY_CACHE_LOCK = threading.Lock()
 
 
 def item_fetch_cache_key(item: dict) -> str:
@@ -2390,6 +2402,7 @@ def prefetch_status_snapshot() -> dict:
 def clear_fetch_bytes_cache() -> None:
     """プロセス内の資料バイト列キャッシュを破棄し、prefetch 完了扱いもリセットする。"""
     global _PREFETCH_THREAD, _jma_list_cache, _himawari_jp_times_cache
+    clear_merged_pdf_ready_cache()
     with _FETCH_BYTES_CACHE_LOCK:
         _FETCH_BYTES_CACHE.clear()
     with _PREFETCH_STATE_LOCK:
@@ -2523,6 +2536,126 @@ def refetch_all_download_items(cfg: dict, *, timeout: int = 90) -> tuple[int, in
         _PREFETCH_STATE["errors"] = err
         _PREFETCH_STATE["running"] = False
     return ok, err, expand_warnings + fetch_notes
+
+
+def clear_merged_pdf_ready_cache() -> None:
+    """結合 PDF の事前生成キャッシュを破棄する。"""
+    with _MERGED_PDF_READY_CACHE_LOCK:
+        _MERGED_PDF_READY_CACHE.clear()
+
+
+def _merged_pdf_block(cfg: dict) -> dict:
+    block = cfg.get("merged_pdf")
+    return block if isinstance(block, dict) else {}
+
+
+def _background_refresh_interval_min(cfg: dict) -> int:
+    raw = _merged_pdf_block(cfg).get("background_refresh_minutes")
+    try:
+        m = int(raw) if raw is not None else 30
+    except (TypeError, ValueError):
+        m = 30
+    return max(0, min(180, m))
+
+
+def _merged_pdf_prebuild_enabled(cfg: dict) -> bool:
+    block = _merged_pdf_block(cfg)
+    if "prebuild_merged_pdf" in block:
+        return bool(block.get("prebuild_merged_pdf"))
+    return True
+
+
+def _merged_pdf_cache_ttl_sec(cfg: dict) -> float:
+    raw = _merged_pdf_block(cfg).get("merged_pdf_cache_ttl_minutes")
+    try:
+        mins = float(raw) if raw is not None else 40.0
+    except (TypeError, ValueError):
+        mins = 40.0
+    return max(5.0, min(240.0, mins)) * 60.0
+
+
+def _merged_pdf_cache_key(cfg: dict, **kwargs) -> str:
+    payload = {
+        "build": PORTAL_BUILD,
+        "merged_taf_selection": kwargs.get("merged_taf_selection"),
+        "merged_sigwx_areas": sorted(kwargs["merged_sigwx_areas"])
+        if kwargs.get("merged_sigwx_areas") is not None
+        else None,
+        "merged_detailed_sigwx_figs": sorted(kwargs["merged_detailed_sigwx_figs"])
+        if kwargs.get("merged_detailed_sigwx_figs") is not None
+        else None,
+        "merged_typhoon_ids": sorted(kwargs["merged_typhoon_ids"])
+        if kwargs.get("merged_typhoon_ids") is not None
+        else None,
+    }
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def background_refresh_snapshot() -> dict:
+    """Streamlit 表示用: バックグラウンド自動更新の状態。"""
+    with _BACKGROUND_STATE_LOCK:
+        return {
+            "scheduler_running": bool(_BACKGROUND_STATE.get("scheduler_running")),
+            "refresh_running": bool(_BACKGROUND_STATE.get("refresh_running")),
+            "last_refresh_utc": str(_BACKGROUND_STATE.get("last_refresh_utc") or ""),
+            "last_merged_pdf_utc": str(_BACKGROUND_STATE.get("last_merged_pdf_utc") or ""),
+            "interval_minutes": int(_BACKGROUND_STATE.get("interval_minutes") or 0),
+        }
+
+
+def _background_materials_refresh_cycle(cfg: dict) -> None:
+    """全資料の再取得と（有効時）結合 PDF の事前生成。"""
+    if not _BACKGROUND_REFRESH_LOCK.acquire(blocking=False):
+        return
+    with _BACKGROUND_STATE_LOCK:
+        _BACKGROUND_STATE["refresh_running"] = True
+    try:
+        refetch_all_download_items(cfg)
+        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        with _BACKGROUND_STATE_LOCK:
+            _BACKGROUND_STATE["last_refresh_utc"] = ts
+        if _merged_pdf_prebuild_enabled(cfg):
+            build_merged_pdf_cached(cfg, force_refresh=True)
+            with _BACKGROUND_STATE_LOCK:
+                _BACKGROUND_STATE["last_merged_pdf_utc"] = datetime.now(UTC).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+    finally:
+        with _BACKGROUND_STATE_LOCK:
+            _BACKGROUND_STATE["refresh_running"] = False
+        _BACKGROUND_REFRESH_LOCK.release()
+
+
+def start_wx_briefing_background_scheduler(cfg: dict) -> None:
+    """
+    ログイン後にバックグラウンドで資料を定期再取得し、結合 PDF を温めておく。
+    ``merged_pdf.background_refresh_minutes``（既定 30、0 で無効＝従来の prefetch のみ）。
+    """
+    global _SCHEDULER_THREAD
+    interval_min = _background_refresh_interval_min(cfg)
+    if interval_min <= 0:
+        start_wx_briefing_prefetch(cfg)
+        return
+
+    with _BACKGROUND_STATE_LOCK:
+        if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
+            return
+        _BACKGROUND_STATE["interval_minutes"] = interval_min
+        _BACKGROUND_STATE["scheduler_running"] = True
+
+    def _loop() -> None:
+        while True:
+            try:
+                live = load_config()
+                _background_materials_refresh_cycle(live)
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(float(interval_min) * 60.0)
+
+    th = threading.Thread(target=_loop, daemon=True, name="wx-briefing-bg-scheduler")
+    _SCHEDULER_THREAD = th
+    th.start()
 
 
 def _fetch_item_bytes_uncached(item: dict, timeout: int = 90) -> tuple[bytes, str | None]:
@@ -4237,6 +4370,43 @@ def build_merged_pdf(
     out_buf = io.BytesIO()
     writer.write(out_buf)
     return out_buf.getvalue(), errors, warnings, pages_added
+
+
+def build_merged_pdf_cached(
+    cfg: dict,
+    *,
+    force_refresh: bool = False,
+    merged_taf_selection: dict | None = None,
+    merged_sigwx_areas: list[str] | None = None,
+    merged_detailed_sigwx_figs: list[str] | None = None,
+    merged_typhoon_ids: list[str] | None = None,
+) -> tuple[bytes, list[str], list[str], int]:
+    """
+    結合 PDF を返す。同一選択・ビルドでキャッシュが新しければ即返す。
+    バックグラウンド更新または手動生成で温めておくとボタン押下が速い。
+    """
+    pdf_kw = {
+        "merged_taf_selection": merged_taf_selection,
+        "merged_sigwx_areas": merged_sigwx_areas,
+        "merged_detailed_sigwx_figs": merged_detailed_sigwx_figs,
+        "merged_typhoon_ids": merged_typhoon_ids,
+    }
+    key = _merged_pdf_cache_key(cfg, **pdf_kw)
+    ttl = _merged_pdf_cache_ttl_sec(cfg)
+    now = time.time()
+    if not force_refresh:
+        with _MERGED_PDF_READY_CACHE_LOCK:
+            hit = _MERGED_PDF_READY_CACHE.get(key)
+        if hit is not None:
+            cached_at, data, errs, warns, pages = hit
+            if data and (now - cached_at) < ttl:
+                return data, list(errs), list(warns), int(pages)
+    result = build_merged_pdf(cfg, **pdf_kw)
+    data, errs, warns, pages = result
+    if data:
+        with _MERGED_PDF_READY_CACHE_LOCK:
+            _MERGED_PDF_READY_CACHE[key] = (now, data, list(errs), list(warns), int(pages))
+    return result
 
 
 def metar_taf_airports_from_config(cfg: dict) -> list[dict[str, str]]:
