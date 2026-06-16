@@ -369,6 +369,79 @@ def _wx_build_display() -> str:
     return str(getattr(wx, "PORTAL_BUILD", "unknown"))
 
 
+def _wx_runtime_diag() -> dict[str, str | bool]:
+    fn = getattr(wx, "portal_runtime_diagnostics", None)
+    if callable(fn):
+        try:
+            raw = fn()
+            if isinstance(raw, dict):
+                return raw
+        except Exception:  # noqa: BLE001
+            pass
+    return {
+        "app_py": str(_ROOT / "app.py"),
+        "repo_root": str(_ROOT),
+        "portal_build": str(getattr(wx, "PORTAL_BUILD", "unknown")),
+        "build_stamp": _wx_build_display(),
+    }
+
+
+def _duplicate_repo_warning(cur_root: Path) -> str | None:
+    """GitHub Desktop 等で別フォルダの古いコピーを使っていないか。"""
+    dup = (Path.home() / "Documents/GitHub/WX-BRIEF-JCAB-for-PPL-CPL-IR").resolve()
+    cur = cur_root.resolve()
+    if not dup.is_dir() or dup == cur:
+        return None
+    dup_app = dup / "app.py"
+    if not dup_app.is_file():
+        return None
+    cur_build = str(getattr(wx, "PORTAL_BUILD", ""))
+    m = re.search(r'PORTAL_BUILD\s*=\s*"([^"]+)"', dup_app.read_text(encoding="utf-8", errors="replace"))
+    dup_build = m.group(1) if m else "?"
+    if dup_build == cur_build:
+        return None
+    return (
+        f"別フォルダに古いコピーがあります: `{dup}`（PORTAL_BUILD={dup_build}）。"
+        f" いま起動中: `{cur}`（{cur_build}）。"
+        " GitHub Desktop / ターミナルの作業ディレクトリがこちらか確認してください。"
+    )
+
+
+def _runtime_health_warnings() -> list[str]:
+    """起動直後・画面に出す切り分け用の注意。"""
+    diag = _wx_runtime_diag()
+    warns: list[str] = []
+    dup = _duplicate_repo_warning(_ROOT)
+    if dup:
+        warns.append(dup)
+    if diag.get("coastline_overlay_png") and not diag.get("coastline_overlay_png_ok"):
+        warns.append(
+            "海岸線オーバーレイ PNG が見つかりません: "
+            f"{diag.get('coastline_overlay_png')}（repo: {diag.get('repo_root')}）"
+        )
+    if diag.get("coastline_overlay_png") and not diag.get("coastline_overlay_fn_ok"):
+        warns.append("海岸線オーバーレイ処理が未ロードの app.py です。Streamlit を再起動してください。")
+    return warns
+
+
+def _render_runtime_sidebar() -> None:
+    """いま動いているコードのパス・機能状態（切り分け用）。"""
+    diag = _wx_runtime_diag()
+    with st.sidebar.expander("実行環境（切り分け）", expanded=False):
+        st.caption(f"PORTAL_BUILD: {diag.get('portal_build', '?')}")
+        st.code(str(diag.get("app_py") or "?"), language=None)
+        st.caption(f"repo: {diag.get('repo_root', '?')}")
+        if diag.get("coastline_overlay_png"):
+            ok = bool(diag.get("coastline_overlay_png_ok"))
+            st.caption(
+                f"海岸線オーバーレイ: {'OK' if ok else 'NG'} — {diag.get('coastline_overlay_png')}"
+            )
+        st.caption(
+            "変更が反映されないとき: ①上の app.py パスが編集したフォルダか "
+            "②結合PDFを再生成したか ③Streamlit を再起動したか を確認。"
+        )
+
+
 # 衛星などのキャプション文字は app.py の Pillow（_hrpns_caption_font）で描画する。
 # Streamlit Cloud: リポジトリ直下の packages.txt で fonts-noto-cjk を入れる。
 # 自前フォント: wx-briefing-portal/fonts/ に .otf/.ttf を置くか、環境変数
@@ -964,6 +1037,7 @@ def _render_charts_zip(cfg: dict) -> None:
                     st.session_state["_merged_pages"] = pages
                     st.session_state["_merged_errs"] = errs
                     st.session_state["_merged_warns"] = warns
+                    st.session_state["_merged_pdf_build"] = str(getattr(wx, "PORTAL_BUILD", ""))
         with refresh_col:
             if st.button("資料を更新", type="secondary", key="btn_refresh_charts"):
                 _request_materials_refresh()
@@ -985,6 +1059,13 @@ def _render_charts_zip(cfg: dict) -> None:
     if st.session_state.get("_merged_pdf"):
         b = st.session_state["_merged_pdf"]
         pgs = st.session_state.get("_merged_pages", 0)
+        cur_build = str(getattr(wx, "PORTAL_BUILD", ""))
+        gen_build = str(st.session_state.get("_merged_pdf_build") or "")
+        if gen_build and gen_build != cur_build:
+            st.warning(
+                f"表示中の結合 PDF は旧ビルド（{gen_build}）で生成されています。"
+                f" 現在のコードは {cur_build} です。「結合 PDF を生成」を押して再生成してください。"
+            )
         if b:
             st.success(f"結合 PDF 準備完了（約 {pgs} ページ）")
             st.download_button(
@@ -1048,6 +1129,7 @@ def _clear_stored_material_outputs() -> None:
         "_merged_pages",
         "_merged_errs",
         "_merged_warns",
+        "_merged_pdf_build",
         "_zip",
         "_zip_ok",
         "_zip_errs",
@@ -1149,6 +1231,8 @@ def main() -> None:
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(f"ビルド: {_wx_build_display()}　15期　Ishikawa")
+    for _rw in _runtime_health_warnings():
+        st.warning(_rw)
 
     _run_materials_refresh_if_requested()
 
@@ -1158,6 +1242,7 @@ def main() -> None:
             start_fn(cfg)
 
     with st.sidebar:
+        _render_runtime_sidebar()
         ha = cfg.get("http_auth")
         if isinstance(ha, dict) and bool(ha.get("enabled")):
             st.subheader("アカウント")

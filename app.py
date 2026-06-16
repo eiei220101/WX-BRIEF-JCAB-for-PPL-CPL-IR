@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260614-92-aupq-coastline-overlay"
+PORTAL_BUILD = "20260616-93-runtime-diagnostics"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -121,6 +121,37 @@ def portal_build_short_stamp() -> str:
             "%Y-%m-%dT%H:%M:%SZ"
         )
     return f"{PORTAL_BUILD} | app.py {mtime_s}"
+
+
+def portal_runtime_diagnostics() -> dict[str, str | bool]:
+    """Streamlit 等: いま動いているコードの切り分け用（パス・機能フラグ）。"""
+    root = _PORTAL_APP_PATH.parent
+    overlay_png = ""
+    overlay_ok = False
+    overlay_fn = "_apply_coastline_overlay_to_pdf_bytes"
+    try:
+        cfg = load_config()
+        nm = cfg.get("jma_numericmap_upper")
+        if isinstance(nm, dict):
+            ov = nm.get("coastline_overlay")
+            if isinstance(ov, dict) and ov.get("enabled") is not False:
+                overlay_png = str(ov.get("png") or "").strip()
+                if overlay_png:
+                    overlay_ok = _portal_asset_path(overlay_png).is_file()
+    except Exception:  # noqa: BLE001
+        pass
+    return {
+        "app_py": str(_PORTAL_APP_PATH),
+        "repo_root": str(root),
+        "config_json": str(CONFIG_PATH),
+        "portal_build": PORTAL_BUILD,
+        "build_stamp": portal_build_short_stamp(),
+        "coastline_overlay_png": overlay_png,
+        "coastline_overlay_png_ok": overlay_ok,
+        "coastline_overlay_fn_ok": callable(globals().get(overlay_fn)),
+    }
+
+
 # NOAA Aviation Weather Center（公開 API・METAR/TAF 用・source=noaa_awc のとき）
 AWC_API_METAR = "https://aviationweather.gov/api/data/metar"
 AWC_API_TAF = "https://aviationweather.gov/api/data/taf"
