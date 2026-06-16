@@ -110,6 +110,17 @@
   "jma_numericmap_upper": {
     "enabled": true,
     "utc_hour": "12",
+    "coastline_overlay": {
+      "enabled": true,
+      "png": "assets/overlays/nihon_coastline_overlay.png",
+      "product_ids": ["aupq35", "aupq78"],
+      "reference_size": [700, 1024],
+      "src_tr": [559, 95],
+      "src_bl": [157, 661],
+      "ref_tr": [676, 37],
+      "ref_bl": [21, 984],
+      "line_rgb": [255, 140, 0]
+    },
     "products": [
       { "id": "aupq35", "filename": "AUPQ35_12UTC.pdf" },
       { "id": "aupq78", "filename": "AUPQ78_12UTC.pdf" }

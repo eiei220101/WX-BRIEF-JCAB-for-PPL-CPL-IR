@@ -31,6 +31,8 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.pdfgen import canvas as rl_canvas
+from reportlab.lib.utils import ImageReader as RlImageReader
 from reportlab.platypus import KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from xml.sax.saxutils import escape as xml_escape
 import secrets
@@ -46,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260614-91-metar-taf-keep-together"
+PORTAL_BUILD = "20260614-92-aupq-coastline-overlay"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2642,6 +2644,145 @@ def _merged_pdf_fetch_one(ix_item: tuple[int, dict]) -> tuple[int, dict, str, st
         return i, item, name, "err", None, None, f"{name}: {e}"
 
 
+def _portal_asset_path(rel: str) -> Path:
+    p = Path(str(rel).strip())
+    if p.is_absolute():
+        return p
+    return _PORTAL_APP_PATH.parent / p
+
+
+def _numericmap_coastline_overlay_spec(nm: dict, product_id: str) -> dict | None:
+    """jma_numericmap_upper.coastline_overlay を結合 PDF 用 item へ渡す。"""
+    ov = nm.get("coastline_overlay")
+    if not isinstance(ov, dict) or ov.get("enabled") is False:
+        return None
+    pid = re.sub(r"[^a-z0-9]", "", str(product_id).lower())
+    ids = ov.get("product_ids")
+    if isinstance(ids, list) and ids:
+        allow = {re.sub(r"[^a-z0-9]", "", str(x).lower()) for x in ids if str(x).strip()}
+        if allow and pid not in allow:
+            return None
+    png = str(ov.get("png") or "").strip()
+    if not png:
+        return None
+    return {
+        "png": png,
+        "reference_size": ov.get("reference_size") or [700, 1024],
+        "src_tr": ov.get("src_tr") or [559, 95],
+        "src_bl": ov.get("src_bl") or [157, 661],
+        "ref_tr": ov.get("ref_tr") or [676, 37],
+        "ref_bl": ov.get("ref_bl") or [21, 984],
+        "line_rgb": ov.get("line_rgb") or [255, 140, 0],
+    }
+
+
+def _extract_coastline_overlay_rgba(im, line_rgb: tuple[int, int, int]):
+    """オーバーレイ PNG から海岸線・位置合わせ十字（淡いオレンジ線）だけを抜き出す。"""
+    from PIL import Image as PilImage
+
+    src = im.convert("RGBA")
+    out = PilImage.new("RGBA", src.size, (0, 0, 0, 0))
+    sp = src.load()
+    dp = out.load()
+    lr, lg, lb = line_rgb
+    for y in range(src.height):
+        for x in range(src.width):
+            r, g, b, _a = sp[x, y]
+            if not (r == 255 and g == 255 and b == 255) and r >= 230 and g >= 200:
+                dp[x, y] = (lr, lg, lb, 255)
+    return out
+
+
+def _warp_coastline_overlay_to_page(
+    overlay,
+    page_w: float,
+    page_h: float,
+    *,
+    src_tr: tuple[float, float],
+    src_bl: tuple[float, float],
+    ref_size: tuple[float, float],
+    ref_tr: tuple[float, float],
+    ref_bl: tuple[float, float],
+):
+    """完成見本の十字位置に合わせ、オーバーレイをページ座標へアフィン変換する。"""
+    from PIL import Image as PilImage
+
+    ref_w, ref_h = ref_size
+    tgt_tr = (ref_tr[0] / ref_w * page_w, ref_tr[1] / ref_h * page_h)
+    tgt_bl = (ref_bl[0] / ref_w * page_w, ref_bl[1] / ref_h * page_h)
+    sx = (tgt_tr[0] - tgt_bl[0]) / (src_tr[0] - src_bl[0])
+    sy = (tgt_tr[1] - tgt_bl[1]) / (src_tr[1] - src_bl[1])
+    tx = tgt_tr[0] - sx * src_tr[0]
+    ty = tgt_tr[1] - sy * src_tr[1]
+    inv = (1 / sx, 0, -tx / sx, 0, 1 / sy, -ty / sy)
+    size = (max(1, int(round(page_w))), max(1, int(round(page_h))))
+    return overlay.transform(size, PilImage.Transform.AFFINE, inv, resample=PilImage.Resampling.BICUBIC)
+
+
+def _apply_coastline_overlay_to_pdf_bytes(pdf_bytes: bytes, overlay_spec: dict) -> bytes:
+    """AUPQ 等の PDF 各ページに海岸線オーバーレイ PNG を重ねる。"""
+    from PIL import Image as PilImage
+    from pypdf import PdfReader, PdfWriter
+
+    png_path = _portal_asset_path(str(overlay_spec.get("png") or ""))
+    if not png_path.is_file():
+        raise FileNotFoundError(f"海岸線オーバーレイ PNG が見つかりません: {png_path}")
+
+    def _xy(pair: object, default: tuple[float, float]) -> tuple[float, float]:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            return float(pair[0]), float(pair[1])
+        return default
+
+    ref_size_raw = overlay_spec.get("reference_size") or [700, 1024]
+    ref_size = (
+        float(ref_size_raw[0]) if len(ref_size_raw) >= 1 else 700.0,
+        float(ref_size_raw[1]) if len(ref_size_raw) >= 2 else 1024.0,
+    )
+    src_tr = _xy(overlay_spec.get("src_tr"), (559.0, 95.0))
+    src_bl = _xy(overlay_spec.get("src_bl"), (157.0, 661.0))
+    ref_tr = _xy(overlay_spec.get("ref_tr"), (676.0, 37.0))
+    ref_bl = _xy(overlay_spec.get("ref_bl"), (21.0, 984.0))
+    line_rgb_raw = overlay_spec.get("line_rgb") or [255, 140, 0]
+    line_rgb = (
+        int(line_rgb_raw[0]) if len(line_rgb_raw) >= 1 else 255,
+        int(line_rgb_raw[1]) if len(line_rgb_raw) >= 2 else 140,
+        int(line_rgb_raw[2]) if len(line_rgb_raw) >= 3 else 0,
+    )
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if len(reader.pages) == 0:
+        raise ValueError("海岸線オーバーレイ: PDF にページがありません")
+
+    overlay_src = PilImage.open(png_path)
+    overlay_rgba = _extract_coastline_overlay_rgba(overlay_src, line_rgb)
+
+    writer = PdfWriter()
+    for page in reader.pages:
+        pw = float(page.mediabox.width)
+        ph = float(page.mediabox.height)
+        warped = _warp_coastline_overlay_to_page(
+            overlay_rgba,
+            pw,
+            ph,
+            src_tr=src_tr,
+            src_bl=src_bl,
+            ref_size=ref_size,
+            ref_tr=ref_tr,
+            ref_bl=ref_bl,
+        )
+        ov_buf = io.BytesIO()
+        c = rl_canvas.Canvas(ov_buf, pagesize=(pw, ph))
+        c.drawImage(RlImageReader(warped), 0, 0, width=pw, height=ph, mask="auto")
+        c.showPage()
+        c.save()
+        page.merge_page(PdfReader(ov_buf).pages[0])
+        writer.add_page(page)
+
+    out_buf = io.BytesIO()
+    writer.write(out_buf)
+    return out_buf.getvalue()
+
+
 def expand_download_items(
     cfg: dict,
     *,
@@ -2822,6 +2963,9 @@ def expand_download_items(
                     "comment": "気象庁 数値予報天気図・高層（numericmap / UPPER_PROPS）",
                 }
             )
+            ov_spec = _numericmap_coastline_overlay_spec(nm, str(pid))
+            if ov_spec:
+                out[-1]["coastline_overlay"] = ov_spec
 
     msc = cfg.get("jma_msc_himawari_japan")
     if isinstance(msc, dict) and msc.get("enabled"):
@@ -3784,6 +3928,12 @@ def build_merged_pdf(
 
         try:
             if low.endswith(".pdf"):
+                overlay_spec = item.get("coastline_overlay")
+                if isinstance(overlay_spec, dict) and overlay_spec.get("png"):
+                    try:
+                        data = _apply_coastline_overlay_to_pdf_bytes(data, overlay_spec)
+                    except Exception as e:  # noqa: BLE001
+                        warnings.append(f"{name}: 海岸線オーバーレイ失敗 {e}")
                 reader = PdfReader(io.BytesIO(data))
                 n = len(reader.pages)
                 if n == 0:
