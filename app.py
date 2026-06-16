@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260616-93-runtime-diagnostics"
+PORTAL_BUILD = "20260616-96-coastline-quad-warp"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2682,6 +2682,75 @@ def _portal_asset_path(rel: str) -> Path:
     return _PORTAL_APP_PATH.parent / p
 
 
+def _coastline_overlay_xy(pair: object, default: tuple[float, float]) -> tuple[float, float]:
+    if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+        return float(pair[0]), float(pair[1])
+    return default
+
+
+def _warp_coastline_panel_quad(
+    overlay,
+    canvas_size: tuple[int, int],
+    *,
+    src_quad: tuple[float, float, float, float, float, float, float, float],
+    ref_size: tuple[float, float],
+    dst_quad: tuple[float, float, float, float, float, float, float, float],
+):
+    """ソース四隅を完成見本の図枠四隅へ QUAD 変換してキャンバスに貼る。"""
+    from PIL import Image as PilImage
+
+    px_w, px_h = canvas_size
+    ref_w, ref_h = ref_size
+
+    def _scale_quad(q: tuple[float, ...]) -> tuple[float, float, float, float, float, float, float, float]:
+        return tuple(
+            (
+                q[0] / ref_w * px_w,
+                q[1] / ref_h * px_h,
+                q[2] / ref_w * px_w,
+                q[3] / ref_h * px_h,
+                q[4] / ref_w * px_w,
+                q[5] / ref_h * px_h,
+                q[6] / ref_w * px_w,
+                q[7] / ref_h * px_h,
+            )
+        )
+
+    tgt = _scale_quad(dst_quad)
+    xs = [tgt[0], tgt[2], tgt[4], tgt[6]]
+    ys = [tgt[1], tgt[3], tgt[5], tgt[7]]
+    x0, x1 = int(min(xs)), int(max(xs)) + 1
+    y0, y1 = int(min(ys)), int(max(ys)) + 1
+    patch_w, patch_h = max(1, x1 - x0), max(1, y1 - y0)
+    patch = overlay.transform(
+        (patch_w, patch_h),
+        PilImage.Transform.QUAD,
+        src_quad,
+        resample=PilImage.Resampling.BILINEAR,
+    )
+    canvas = PilImage.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+    canvas.paste(patch, (x0, y0), patch)
+    return canvas
+
+
+def _default_coastline_overlay_panels() -> list[dict]:
+    """
+    AUPQ35 / AUPQ78（上下2面図）: テンプレート PNG の各マップを図枠四隅で合わせる。
+    dst_* は完成見本 700×1024 上の図枠（ref 座標）。
+    src_* は nihon_coastline_overlay.png 上の各マップ外接矩形。
+    """
+    return [
+        {
+            "src_quad": [288, 80, 576, 80, 576, 420, 288, 420],
+            "dst_quad": [20, 42, 679, 42, 679, 499, 20, 499],
+        },
+        {
+            "src_quad": [144, 400, 500, 400, 500, 680, 144, 680],
+            "dst_quad": [20, 500, 679, 500, 679, 977, 20, 977],
+        },
+    ]
+
+
 def _numericmap_coastline_overlay_spec(nm: dict, product_id: str) -> dict | None:
     """jma_numericmap_upper.coastline_overlay を結合 PDF 用 item へ渡す。"""
     ov = nm.get("coastline_overlay")
@@ -2693,117 +2762,213 @@ def _numericmap_coastline_overlay_spec(nm: dict, product_id: str) -> dict | None
         allow = {re.sub(r"[^a-z0-9]", "", str(x).lower()) for x in ids if str(x).strip()}
         if allow and pid not in allow:
             return None
-    png = str(ov.get("png") or "").strip()
+    png = str(ov.get("png") or ov.get("reference_png") or "").strip()
     if not png:
         return None
+    panels = ov.get("panels")
+    if not isinstance(panels, list) or not panels:
+        panels = _default_coastline_overlay_panels()
     return {
+        "mode": str(ov.get("mode") or "template"),
         "png": png,
+        "dpi": float(ov.get("dpi") or 300),
         "reference_size": ov.get("reference_size") or [700, 1024],
-        "src_tr": ov.get("src_tr") or [559, 95],
-        "src_bl": ov.get("src_bl") or [157, 661],
-        "ref_tr": ov.get("ref_tr") or [676, 37],
-        "ref_bl": ov.get("ref_bl") or [21, 984],
+        "panels": panels,
         "line_rgb": ov.get("line_rgb") or [255, 140, 0],
+        "line_width": float(ov.get("line_width") or 1.0),
     }
 
 
-def _extract_coastline_overlay_rgba(im, line_rgb: tuple[int, int, int]):
-    """オーバーレイ PNG から海岸線・位置合わせ十字（淡いオレンジ線）だけを抜き出す。"""
+def _extract_coastline_lines_rgba(im, line_rgb: tuple[int, int, int], *, mark_centers: list[tuple[float, float]]):
+    """オーバーレイ PNG から細い海岸線だけを抜き出す（淡色の滲み・位置合わせ十字は除外）。"""
     from PIL import Image as PilImage
+    from PIL import ImageFilter
 
     src = im.convert("RGBA")
-    out = PilImage.new("RGBA", src.size, (0, 0, 0, 0))
+    w, h = src.size
     sp = src.load()
-    dp = out.load()
     lr, lg, lb = line_rgb
-    for y in range(src.height):
-        for x in range(src.width):
+    mask = PilImage.new("L", (w, h), 0)
+    mp = mask.load()
+    for y in range(h):
+        for x in range(w):
             r, g, b, _a = sp[x, y]
-            if not (r == 255 and g == 255 and b == 255) and r >= 230 and g >= 200:
-                dp[x, y] = (lr, lg, lb, 255)
+            if (r == 255 and g == 255 and b == 255) or r < 248 or g < 235:
+                continue
+            if b > 252 and g > 250:
+                continue
+            mp[x, y] = 255
+    # 位置合わせ十字（小さな塊）を消す
+    mark_r = 22
+    for cx, cy in mark_centers:
+        x0 = max(0, int(cx) - mark_r)
+        x1 = min(w, int(cx) + mark_r + 1)
+        y0 = max(0, int(cy) - mark_r)
+        y1 = min(h, int(cy) + mark_r + 1)
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                mp[x, y] = 0
+    # 細線化: 収縮→膨張で滲みを抑える
+    mask = mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+    out = PilImage.new("RGBA", (w, h), (0, 0, 0, 0))
+    op = out.load()
+    for y in range(h):
+        for x in range(w):
+            if mp[x, y]:
+                op[x, y] = (lr, lg, lb, 255)
     return out
 
 
-def _warp_coastline_overlay_to_page(
+def _warp_coastline_panel(
     overlay,
-    page_w: float,
-    page_h: float,
+    canvas_size: tuple[int, int],
     *,
+    src_crop: tuple[int, int, int, int],
     src_tr: tuple[float, float],
     src_bl: tuple[float, float],
     ref_size: tuple[float, float],
     ref_tr: tuple[float, float],
     ref_bl: tuple[float, float],
 ):
-    """完成見本の十字位置に合わせ、オーバーレイをページ座標へアフィン変換する。"""
+    """1面分の海岸線をページ座標（高解像度ピクセル）へ配置。"""
     from PIL import Image as PilImage
 
+    x0, y0, x1, y1 = src_crop
+    crop = overlay.crop((x0, y0, x1, y1))
+    # crop 内の基準点
+    ctr = (src_tr[0] - x0, src_tr[1] - y0)
+    cbl = (src_bl[0] - x0, src_bl[1] - y0)
+    px_w, px_h = canvas_size
     ref_w, ref_h = ref_size
-    tgt_tr = (ref_tr[0] / ref_w * page_w, ref_tr[1] / ref_h * page_h)
-    tgt_bl = (ref_bl[0] / ref_w * page_w, ref_bl[1] / ref_h * page_h)
-    sx = (tgt_tr[0] - tgt_bl[0]) / (src_tr[0] - src_bl[0])
-    sy = (tgt_tr[1] - tgt_bl[1]) / (src_tr[1] - src_bl[1])
-    tx = tgt_tr[0] - sx * src_tr[0]
-    ty = tgt_tr[1] - sy * src_tr[1]
+    tgt_tr = (ref_tr[0] / ref_w * px_w, ref_tr[1] / ref_h * px_h)
+    tgt_bl = (ref_bl[0] / ref_w * px_w, ref_bl[1] / ref_h * px_h)
+    sx = (tgt_tr[0] - tgt_bl[0]) / (ctr[0] - cbl[0])
+    sy = (tgt_tr[1] - tgt_bl[1]) / (ctr[1] - cbl[1])
+    tx = tgt_tr[0] - sx * ctr[0]
+    ty = tgt_tr[1] - sy * ctr[1]
     inv = (1 / sx, 0, -tx / sx, 0, 1 / sy, -ty / sy)
-    size = (max(1, int(round(page_w))), max(1, int(round(page_h))))
-    return overlay.transform(size, PilImage.Transform.AFFINE, inv, resample=PilImage.Resampling.BICUBIC)
+    warped = crop.transform(canvas_size, PilImage.Transform.AFFINE, inv, resample=PilImage.Resampling.BILINEAR)
+    return warped
 
 
-def _apply_coastline_overlay_to_pdf_bytes(pdf_bytes: bytes, overlay_spec: dict) -> bytes:
-    """AUPQ 等の PDF 各ページに海岸線オーバーレイ PNG を重ねる。"""
+def _extract_orange_from_reference_rgba(im, line_rgb: tuple[int, int, int]):
+    """完成見本 PNG からオレンジの海岸線だけを抜き出す。"""
     from PIL import Image as PilImage
-    from pypdf import PdfReader, PdfWriter
 
-    png_path = _portal_asset_path(str(overlay_spec.get("png") or ""))
-    if not png_path.is_file():
-        raise FileNotFoundError(f"海岸線オーバーレイ PNG が見つかりません: {png_path}")
+    src = im.convert("RGBA")
+    w, h = src.size
+    sp = src.load()
+    lr, lg, lb = line_rgb
+    out = PilImage.new("RGBA", (w, h), (0, 0, 0, 0))
+    op = out.load()
+    for y in range(h):
+        for x in range(w):
+            r, g, b, _a = sp[x, y]
+            if r > 200 and 80 < g < 200 and b < 120:
+                op[x, y] = (lr, lg, lb, 255)
+    return out
 
-    def _xy(pair: object, default: tuple[float, float]) -> tuple[float, float]:
-        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
-            return float(pair[0]), float(pair[1])
-        return default
 
-    ref_size_raw = overlay_spec.get("reference_size") or [700, 1024]
-    ref_size = (
-        float(ref_size_raw[0]) if len(ref_size_raw) >= 1 else 700.0,
-        float(ref_size_raw[1]) if len(ref_size_raw) >= 2 else 1024.0,
-    )
-    src_tr = _xy(overlay_spec.get("src_tr"), (559.0, 95.0))
-    src_bl = _xy(overlay_spec.get("src_bl"), (157.0, 661.0))
-    ref_tr = _xy(overlay_spec.get("ref_tr"), (676.0, 37.0))
-    ref_bl = _xy(overlay_spec.get("ref_bl"), (21.0, 984.0))
+def _compose_coastline_overlay_page(
+    overlay_src,
+    page_w: float,
+    page_h: float,
+    overlay_spec: dict,
+) -> "object":
+    """全パネルを高解像度キャンバスに合成した RGBA 画像。"""
+    from PIL import Image as PilImage
+
+    dpi = float(overlay_spec.get("dpi") or 300)
+    px_w = max(1, int(round(page_w / 72.0 * dpi)))
+    px_h = max(1, int(round(page_h / 72.0 * dpi)))
     line_rgb_raw = overlay_spec.get("line_rgb") or [255, 140, 0]
     line_rgb = (
         int(line_rgb_raw[0]) if len(line_rgb_raw) >= 1 else 255,
         int(line_rgb_raw[1]) if len(line_rgb_raw) >= 2 else 140,
         int(line_rgb_raw[2]) if len(line_rgb_raw) >= 3 else 0,
     )
+    mode = str(overlay_spec.get("mode") or "template").strip().lower()
+
+    if mode == "reference":
+        ref_size_raw = overlay_spec.get("reference_size") or [700, 1024]
+        ref_w = float(ref_size_raw[0]) if len(ref_size_raw) >= 1 else 700.0
+        ref_h = float(ref_size_raw[1]) if len(ref_size_raw) >= 2 else 1024.0
+        lines = _extract_orange_from_reference_rgba(overlay_src, line_rgb)
+        if (lines.width, lines.height) != (int(ref_w), int(ref_h)):
+            lines = lines.resize((max(1, int(ref_w)), max(1, int(ref_h))), PilImage.Resampling.BILINEAR)
+        return lines.resize((px_w, px_h), PilImage.Resampling.BILINEAR)
+
+    ref_size = (
+        float((overlay_spec.get("reference_size") or [700, 1024])[0]),
+        float((overlay_spec.get("reference_size") or [700, 1024])[1]),
+    )
+    panels = overlay_spec.get("panels") or _default_coastline_overlay_panels()
+    mark_centers: list[tuple[float, float]] = []
+    for p in panels:
+        if not isinstance(p, dict):
+            continue
+        sq = p.get("src_quad")
+        if isinstance(sq, (list, tuple)) and len(sq) >= 8:
+            mark_centers.append(_coastline_overlay_xy((sq[2], sq[3]), (0.0, 0.0)))
+            mark_centers.append(_coastline_overlay_xy((sq[6], sq[7]), (0.0, 0.0)))
+        if p.get("src_tr"):
+            mark_centers.append(_coastline_overlay_xy(p.get("src_tr"), (0.0, 0.0)))
+        if p.get("src_bl"):
+            mark_centers.append(_coastline_overlay_xy(p.get("src_bl"), (0.0, 0.0)))
+    lines = _extract_coastline_lines_rgba(overlay_src, line_rgb, mark_centers=mark_centers)
+    canvas = PilImage.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+    for raw in panels:
+        if not isinstance(raw, dict):
+            continue
+        sq = raw.get("src_quad")
+        dq = raw.get("dst_quad")
+        if isinstance(sq, (list, tuple)) and len(sq) >= 8 and isinstance(dq, (list, tuple)) and len(dq) >= 8:
+            src_q = tuple(float(v) for v in sq[:8])
+            dst_q = tuple(float(v) for v in dq[:8])
+            patch = _warp_coastline_panel_quad(lines, (px_w, px_h), src_quad=src_q, ref_size=ref_size, dst_quad=dst_q)
+            canvas = PilImage.alpha_composite(canvas, patch)
+            continue
+        crop_raw = raw.get("src_crop") or [0, 0, lines.width, lines.height]
+        if len(crop_raw) < 4:
+            continue
+        src_crop = (int(crop_raw[0]), int(crop_raw[1]), int(crop_raw[2]), int(crop_raw[3]))
+        warped = _warp_coastline_panel(
+            lines,
+            (px_w, px_h),
+            src_crop=src_crop,
+            src_tr=_coastline_overlay_xy(raw.get("src_tr"), (490.0, 96.0)),
+            src_bl=_coastline_overlay_xy(raw.get("src_bl"), (300.0, 410.0)),
+            ref_size=ref_size,
+            ref_tr=_coastline_overlay_xy(raw.get("ref_tr"), (677.0, 41.0)),
+            ref_bl=_coastline_overlay_xy(raw.get("ref_bl"), (19.0, 493.0)),
+        )
+        canvas = PilImage.alpha_composite(canvas, warped)
+    return canvas
+
+
+def _apply_coastline_overlay_to_pdf_bytes(pdf_bytes: bytes, overlay_spec: dict) -> bytes:
+    """AUPQ 等の PDF 各ページに海岸線オーバーレイ PNG を重ねる（上下2面・高解像度）。"""
+    from pypdf import PdfReader, PdfWriter
+
+    png_path = _portal_asset_path(str(overlay_spec.get("png") or ""))
+    if not png_path.is_file():
+        raise FileNotFoundError(f"海岸線オーバーレイ PNG が見つかりません: {png_path}")
+
+    from PIL import Image as PilImage
 
     reader = PdfReader(io.BytesIO(pdf_bytes))
     if len(reader.pages) == 0:
         raise ValueError("海岸線オーバーレイ: PDF にページがありません")
 
     overlay_src = PilImage.open(png_path)
-    overlay_rgba = _extract_coastline_overlay_rgba(overlay_src, line_rgb)
-
     writer = PdfWriter()
     for page in reader.pages:
         pw = float(page.mediabox.width)
         ph = float(page.mediabox.height)
-        warped = _warp_coastline_overlay_to_page(
-            overlay_rgba,
-            pw,
-            ph,
-            src_tr=src_tr,
-            src_bl=src_bl,
-            ref_size=ref_size,
-            ref_tr=ref_tr,
-            ref_bl=ref_bl,
-        )
+        composed = _compose_coastline_overlay_page(overlay_src, pw, ph, overlay_spec)
         ov_buf = io.BytesIO()
         c = rl_canvas.Canvas(ov_buf, pagesize=(pw, ph))
-        c.drawImage(RlImageReader(warped), 0, 0, width=pw, height=ph, mask="auto")
+        c.drawImage(RlImageReader(composed), 0, 0, width=pw, height=ph, mask="auto")
         c.showPage()
         c.save()
         page.merge_page(PdfReader(ov_buf).pages[0])
