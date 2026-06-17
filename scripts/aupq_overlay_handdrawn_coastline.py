@@ -412,9 +412,11 @@ def estimate_panel_offsets(
     return offsets
 
 
-_ORANGE_REF_RGB = (255, 140, 0)
-_COASTLINE_SOFT_THRESHOLD = 252
-_COASTLINE_CONNECT = False
+_ORANGE_REF_RGB = (255, 178, 100)
+_COASTLINE_SOFT_THRESHOLD = 145
+_COASTLINE_CONNECT = True
+_COASTLINE_CONNECT_DILATE = 5
+_COASTLINE_CONNECT_ERODE = 3
 
 
 def _coastline_soft_mask(
@@ -449,23 +451,60 @@ def _coastline_soft_mask(
     return np.maximum(soft, ref_soft).astype(np.uint8)
 
 
+def _coastline_soft_mask_from_reference_png(
+    reference_png: Image.Image,
+    base_page: Image.Image | None = None,
+) -> np.ndarray:
+    """700×1024 基準でソフトマスクを作る（拡大前の参照解像度）。"""
+    ref_w, ref_h = _REF_SIZE
+    ref = reference_png.convert("RGB")
+    if ref.size != (ref_w, ref_h):
+        ref = ref.resize((ref_w, ref_h), Image.Resampling.LANCZOS)
+    ref_arr = np.array(ref)
+    base_arr = None
+    if base_page is not None:
+        base = base_page.convert("RGB").resize((ref_w, ref_h), Image.Resampling.LANCZOS)
+        base_arr = np.array(base)
+    return _coastline_soft_mask(ref_arr, base_arr)
+
+
+def _connect_coastline_mask(
+    thick: np.ndarray,
+    *,
+    dilate: int = _COASTLINE_CONNECT_DILATE,
+    erode: int = _COASTLINE_CONNECT_ERODE,
+) -> np.ndarray:
+    """隙間をつないで線幅を均一化（膨張→収縮のクロージング）。"""
+    img = Image.fromarray(thick.astype(np.uint8) * 255, mode="L")
+    if dilate >= 3:
+        img = img.filter(ImageFilter.MaxFilter(dilate))
+    if erode >= 3:
+        img = img.filter(ImageFilter.MinFilter(erode))
+    return np.array(img) > 0
+
+
 def _render_coastline_layer_from_soft_mask(
     soft_mask: np.ndarray,
     line_rgb: tuple[int, int, int],
     *,
+    target_w: int | None = None,
+    target_h: int | None = None,
     threshold: int = _COASTLINE_SOFT_THRESHOLD,
     connect: bool = _COASTLINE_CONNECT,
+    connect_dilate: int = _COASTLINE_CONNECT_DILATE,
+    connect_erode: int = _COASTLINE_CONNECT_ERODE,
 ) -> Image.Image:
-    """ソフトマスクから細い連続線の RGBA レイヤーを作る。"""
+    """参照解像度のソフトマスクをページサイズへ拡大し、均一な連続線の RGBA にする。"""
+    if target_w is not None and target_h is not None:
+        soft_mask = np.array(
+            Image.fromarray(soft_mask, mode="L").resize(
+                (max(1, target_w), max(1, target_h)), Image.Resampling.BILINEAR
+            )
+        )
     thick = soft_mask >= threshold
     if connect:
-        thick = (
-            np.array(
-                Image.fromarray(thick.astype(np.uint8) * 255, mode="L").filter(
-                    ImageFilter.MaxFilter(3)
-                )
-            )
-            > 0
+        thick = _connect_coastline_mask(
+            thick, dilate=connect_dilate, erode=connect_erode
         )
     h, w = soft_mask.shape[:2]
     lr, lg, lb = line_rgb
@@ -490,20 +529,13 @@ def process_page_from_reference_png(
     """
     base = page.convert("RGBA")
     pw, ph = base.size
-
-    ref_arr = np.array(
-        reference_png.convert("RGB").resize((pw, ph), Image.Resampling.LANCZOS)
-    )
-    base_arr = np.array(page.convert("RGB"))
-    soft_mask = _coastline_soft_mask(ref_arr, base_arr)
     target_w = max(1, int(round(pw * overlay_scale)))
     target_h = max(1, int(round(ph * overlay_scale)))
-    if (target_w, target_h) != (pw, ph):
-        soft_img = Image.fromarray(soft_mask, mode="L").resize(
-            (target_w, target_h), Image.Resampling.BILINEAR
-        )
-        soft_mask = np.array(soft_img)
-    layer = _render_coastline_layer_from_soft_mask(soft_mask, _ORANGE_REF_RGB)
+
+    soft_mask = _coastline_soft_mask_from_reference_png(reference_png, page)
+    layer = _render_coastline_layer_from_soft_mask(
+        soft_mask, _ORANGE_REF_RGB, target_w=target_w, target_h=target_h
+    )
     canvas = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
     canvas.paste(layer, (overlay_x, overlay_y), layer)
     merged = Image.alpha_composite(base, canvas)

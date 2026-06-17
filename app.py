@@ -2995,7 +2995,7 @@ def _numericmap_coastline_overlay_spec(nm: dict, product_id: str) -> dict | None
         "dpi": float(ov.get("dpi") or 300),
         "reference_size": ov.get("reference_size") or [700, 1024],
         "panels": panels,
-        "line_rgb": ov.get("line_rgb") or [255, 140, 0],
+        "line_rgb": ov.get("line_rgb") or [255, 178, 100],
         "line_width": float(ov.get("line_width") or 1.0),
     }
 
@@ -3093,8 +3093,10 @@ def _solidify_coastline_rgba(im, line_rgb: tuple[int, int, int], *, thicken_radi
     return PilImage.fromarray(out, "RGBA")
 
 
-_COASTLINE_SOFT_THRESHOLD = 252
-_COASTLINE_CONNECT = False
+_COASTLINE_SOFT_THRESHOLD = 145
+_COASTLINE_CONNECT = True
+_COASTLINE_CONNECT_DILATE = 5
+_COASTLINE_CONNECT_ERODE = 3
 
 
 def _coastline_soft_mask(ref_arr, base_arr=None):
@@ -3123,25 +3125,47 @@ def _coastline_soft_mask(ref_arr, base_arr=None):
     return np.maximum(soft, ref_soft).astype(np.uint8)
 
 
-def _render_coastline_layer_from_soft_mask(
-    soft_mask,
-    line_rgb: tuple[int, int, int],
+def _connect_coastline_mask(
+    thick,
     *,
-    threshold: int = _COASTLINE_SOFT_THRESHOLD,
-    connect: bool = _COASTLINE_CONNECT,
+    dilate: int = _COASTLINE_CONNECT_DILATE,
+    erode: int = _COASTLINE_CONNECT_ERODE,
 ):
     from PIL import Image as PilImage, ImageFilter
     import numpy as np
 
+    img = PilImage.fromarray(thick.astype(np.uint8) * 255, mode="L")
+    if dilate >= 3:
+        img = img.filter(ImageFilter.MaxFilter(dilate))
+    if erode >= 3:
+        img = img.filter(ImageFilter.MinFilter(erode))
+    return np.array(img) > 0
+
+
+def _render_coastline_layer_from_soft_mask(
+    soft_mask,
+    line_rgb: tuple[int, int, int],
+    *,
+    target_w: int | None = None,
+    target_h: int | None = None,
+    threshold: int = _COASTLINE_SOFT_THRESHOLD,
+    connect: bool = _COASTLINE_CONNECT,
+    connect_dilate: int = _COASTLINE_CONNECT_DILATE,
+    connect_erode: int = _COASTLINE_CONNECT_ERODE,
+):
+    from PIL import Image as PilImage
+    import numpy as np
+
+    if target_w is not None and target_h is not None:
+        soft_mask = np.array(
+            PilImage.fromarray(soft_mask, mode="L").resize(
+                (max(1, target_w), max(1, target_h)), PilImage.Resampling.BILINEAR
+            )
+        )
     thick = soft_mask >= threshold
     if connect:
-        thick = (
-            np.array(
-                PilImage.fromarray(thick.astype(np.uint8) * 255, mode="L").filter(
-                    ImageFilter.MaxFilter(3)
-                )
-            )
-            > 0
+        thick = _connect_coastline_mask(
+            thick, dilate=connect_dilate, erode=connect_erode
         )
     h, w = soft_mask.shape[:2]
     lr, lg, lb = line_rgb
@@ -3190,7 +3214,7 @@ def _compose_coastline_overlay_page(
     dpi = float(overlay_spec.get("dpi") or 300)
     px_w = max(1, int(round(page_w / 72.0 * dpi)))
     px_h = max(1, int(round(page_h / 72.0 * dpi)))
-    line_rgb_raw = overlay_spec.get("line_rgb") or [255, 140, 0]
+    line_rgb_raw = overlay_spec.get("line_rgb") or [255, 178, 100]
     line_rgb = (
         int(line_rgb_raw[0]) if len(line_rgb_raw) >= 1 else 255,
         int(line_rgb_raw[1]) if len(line_rgb_raw) >= 2 else 140,
@@ -3199,14 +3223,30 @@ def _compose_coastline_overlay_page(
     mode = str(overlay_spec.get("mode") or "template").strip().lower()
 
     if mode == "reference":
+        ref_size_raw = overlay_spec.get("reference_size") or [700, 1024]
+        ref_w = int(ref_size_raw[0]) if len(ref_size_raw) >= 1 else 700
+        ref_h = int(ref_size_raw[1]) if len(ref_size_raw) >= 2 else 1024
         threshold = int(overlay_spec.get("line_threshold") or _COASTLINE_SOFT_THRESHOLD)
         connect = bool(overlay_spec.get("line_connect", _COASTLINE_CONNECT))
-        ref_img = overlay_src.convert("RGB").resize((px_w, px_h), PilImage.Resampling.LANCZOS)
+        connect_dilate = int(overlay_spec.get("line_connect_dilate") or _COASTLINE_CONNECT_DILATE)
+        connect_erode = int(overlay_spec.get("line_connect_erode") or _COASTLINE_CONNECT_ERODE)
+        ref_img = overlay_src.convert("RGB").resize((ref_w, ref_h), PilImage.Resampling.LANCZOS)
         ref_arr = np.array(ref_img)
-        base_arr = np.array(base_page_img.convert("RGB")) if base_page_img is not None else None
+        base_arr = None
+        if base_page_img is not None:
+            base_arr = np.array(
+                base_page_img.convert("RGB").resize((ref_w, ref_h), PilImage.Resampling.LANCZOS)
+            )
         soft_mask = _coastline_soft_mask(ref_arr, base_arr)
         return _render_coastline_layer_from_soft_mask(
-            soft_mask, line_rgb, threshold=threshold, connect=connect
+            soft_mask,
+            line_rgb,
+            target_w=px_w,
+            target_h=px_h,
+            threshold=threshold,
+            connect=connect,
+            connect_dilate=connect_dilate,
+            connect_erode=connect_erode,
         )
 
     ref_size = (
