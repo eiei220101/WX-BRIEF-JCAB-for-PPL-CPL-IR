@@ -115,9 +115,9 @@
     "enabled": true,
     "utc_hour": "12",
     "coastline_overlay": {
-      "enabled": false,
-      "mode": "template",
-      "png": "assets/overlays/nihon_coastline_overlay.png",
+      "enabled": true,
+      "mode": "reference",
+      "png": "assets/overlays/aupq_upper_coastline_reference.png",
       "product_ids": ["aupq35", "aupq78"],
       "dpi": 300,
       "reference_size": [700, 1024],

@@ -3072,22 +3072,107 @@ def _warp_coastline_panel(
     return warped
 
 
-def _extract_orange_from_reference_rgba(im, line_rgb: tuple[int, int, int]):
-    """完成見本 PNG からオレンジの海岸線だけを抜き出す。"""
+def _solidify_coastline_rgba(im, line_rgb: tuple[int, int, int], *, thicken_radius: int = 1):
+    """細い点列を線として見えるよう、alpha を膨張させて不透明色に統一。"""
+    from PIL import Image as PilImage, ImageFilter
+    import numpy as np
+
+    arr = np.array(im.convert("RGBA"))
+    alpha = arr[:, :, 3]
+    if alpha.max() == 0:
+        return im
+
+    a_img = PilImage.fromarray(alpha, mode="L")
+    size = thicken_radius * 2 + 1
+    a_img = a_img.filter(ImageFilter.MaxFilter(size))
+    thick = np.array(a_img) > 0
+
+    lr, lg, lb = line_rgb
+    out = np.zeros_like(arr)
+    out[thick] = (lr, lg, lb, 255)
+    return PilImage.fromarray(out, "RGBA")
+
+
+_COASTLINE_SOFT_THRESHOLD = 252
+_COASTLINE_CONNECT = False
+
+
+def _coastline_soft_mask(ref_arr, base_arr=None):
+    import numpy as np
+
+    s = ref_arr.sum(axis=2)
+    rb = ref_arr[:, :, 0].astype(np.float32) - ref_arr[:, :, 2].astype(np.float32)
+    on_chart = (s > 250) & (s < 720)
+
+    ref_soft = np.zeros(ref_arr.shape[:2], dtype=np.float32)
+    ref_soft[on_chart] = np.clip((rb[on_chart] - 5.0) * 12.0, 0, 255)
+
+    if base_arr is None or base_arr.shape[:2] != ref_arr.shape[:2]:
+        return ref_soft.astype(np.uint8)
+
+    dr = ref_arr[:, :, 0].astype(np.int16) - base_arr[:, :, 0].astype(np.int16)
+    db = ref_arr[:, :, 2].astype(np.int16) - base_arr[:, :, 2].astype(np.int16)
+    dg = ref_arr[:, :, 1].astype(np.int16) - base_arr[:, :, 1].astype(np.int16)
+    hard = (dr > 5) & (dr - db > 12) & (dr > dg) & on_chart
+    soft = np.zeros(ref_arr.shape[:2], dtype=np.float32)
+    soft[hard] = 255.0
+    fringe = hard | (
+        on_chart & (rb > 6) & (ref_arr[:, :, 0].astype(np.int16) > ref_arr[:, :, 1].astype(np.int16) - 5)
+    )
+    soft[fringe] = np.maximum(soft[fringe], np.clip(rb[fringe] * 10.0, 0, 255))
+    return np.maximum(soft, ref_soft).astype(np.uint8)
+
+
+def _render_coastline_layer_from_soft_mask(
+    soft_mask,
+    line_rgb: tuple[int, int, int],
+    *,
+    threshold: int = _COASTLINE_SOFT_THRESHOLD,
+    connect: bool = _COASTLINE_CONNECT,
+):
+    from PIL import Image as PilImage, ImageFilter
+    import numpy as np
+
+    thick = soft_mask >= threshold
+    if connect:
+        thick = (
+            np.array(
+                PilImage.fromarray(thick.astype(np.uint8) * 255, mode="L").filter(
+                    ImageFilter.MaxFilter(3)
+                )
+            )
+            > 0
+        )
+    h, w = soft_mask.shape[:2]
+    lr, lg, lb = line_rgb
+    out = np.zeros((h, w, 4), dtype=np.uint8)
+    out[thick] = (lr, lg, lb, 255)
+    return PilImage.fromarray(out, "RGBA")
+
+
+def _rasterize_pdf_page_rgb(pdf_bytes: bytes, page_index: int, dpi: int, size: tuple[int, int]):
+    """PDF ページを RGB 画像に（pdf2image が使えるときのみ）。"""
     from PIL import Image as PilImage
 
-    src = im.convert("RGBA")
-    w, h = src.size
-    sp = src.load()
-    lr, lg, lb = line_rgb
-    out = PilImage.new("RGBA", (w, h), (0, 0, 0, 0))
-    op = out.load()
-    for y in range(h):
-        for x in range(w):
-            r, g, b, _a = sp[x, y]
-            if r > 200 and 80 < g < 200 and b < 120:
-                op[x, y] = (lr, lg, lb, 255)
-    return out
+    try:
+        from pdf2image import convert_from_bytes
+    except ImportError:
+        return None
+    try:
+        imgs = convert_from_bytes(
+            pdf_bytes,
+            dpi=dpi,
+            first_page=page_index + 1,
+            last_page=page_index + 1,
+        )
+    except Exception:
+        return None
+    if not imgs:
+        return None
+    img = imgs[0].convert("RGB")
+    if img.size != size:
+        img = img.resize(size, PilImage.Resampling.LANCZOS)
+    return img
 
 
 def _compose_coastline_overlay_page(
@@ -3095,9 +3180,12 @@ def _compose_coastline_overlay_page(
     page_w: float,
     page_h: float,
     overlay_spec: dict,
+    *,
+    base_page_img=None,
 ) -> "object":
     """全パネルを高解像度キャンバスに合成した RGBA 画像。"""
     from PIL import Image as PilImage
+    import numpy as np
 
     dpi = float(overlay_spec.get("dpi") or 300)
     px_w = max(1, int(round(page_w / 72.0 * dpi)))
@@ -3111,13 +3199,15 @@ def _compose_coastline_overlay_page(
     mode = str(overlay_spec.get("mode") or "template").strip().lower()
 
     if mode == "reference":
-        ref_size_raw = overlay_spec.get("reference_size") or [700, 1024]
-        ref_w = float(ref_size_raw[0]) if len(ref_size_raw) >= 1 else 700.0
-        ref_h = float(ref_size_raw[1]) if len(ref_size_raw) >= 2 else 1024.0
-        lines = _extract_orange_from_reference_rgba(overlay_src, line_rgb)
-        if (lines.width, lines.height) != (int(ref_w), int(ref_h)):
-            lines = lines.resize((max(1, int(ref_w)), max(1, int(ref_h))), PilImage.Resampling.BILINEAR)
-        return lines.resize((px_w, px_h), PilImage.Resampling.BILINEAR)
+        threshold = int(overlay_spec.get("line_threshold") or _COASTLINE_SOFT_THRESHOLD)
+        connect = bool(overlay_spec.get("line_connect", _COASTLINE_CONNECT))
+        ref_img = overlay_src.convert("RGB").resize((px_w, px_h), PilImage.Resampling.LANCZOS)
+        ref_arr = np.array(ref_img)
+        base_arr = np.array(base_page_img.convert("RGB")) if base_page_img is not None else None
+        soft_mask = _coastline_soft_mask(ref_arr, base_arr)
+        return _render_coastline_layer_from_soft_mask(
+            soft_mask, line_rgb, threshold=threshold, connect=connect
+        )
 
     ref_size = (
         float((overlay_spec.get("reference_size") or [700, 1024])[0]),
@@ -3183,10 +3273,21 @@ def _apply_coastline_overlay_to_pdf_bytes(pdf_bytes: bytes, overlay_spec: dict) 
 
     overlay_src = PilImage.open(png_path)
     writer = PdfWriter()
-    for page in reader.pages:
+    dpi = float(overlay_spec.get("dpi") or 300)
+    use_raster_base = str(overlay_spec.get("mode") or "").strip().lower() == "reference"
+    for page_index, page in enumerate(reader.pages):
         pw = float(page.mediabox.width)
         ph = float(page.mediabox.height)
-        composed = _compose_coastline_overlay_page(overlay_src, pw, ph, overlay_spec)
+        px_w = max(1, int(round(pw / 72.0 * dpi)))
+        px_h = max(1, int(round(ph / 72.0 * dpi)))
+        base_page_img = None
+        if use_raster_base:
+            base_page_img = _rasterize_pdf_page_rgb(
+                pdf_bytes, page_index, dpi, (px_w, px_h)
+            )
+        composed = _compose_coastline_overlay_page(
+            overlay_src, pw, ph, overlay_spec, base_page_img=base_page_img
+        )
         ov_buf = io.BytesIO()
         c = rl_canvas.Canvas(ov_buf, pagesize=(pw, ph))
         c.drawImage(RlImageReader(composed), 0, 0, width=pw, height=ph, mask="auto")
