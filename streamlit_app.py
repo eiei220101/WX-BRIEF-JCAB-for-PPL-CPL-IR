@@ -92,16 +92,28 @@ def _region_title_heading(title: str) -> None:
     )
 
 
-def _region_select_all_header(sel_key: str, target_keys: list[str]) -> None:
+def _region_select_all_header(
+    sel_key: str,
+    target_keys: list[str],
+    *,
+    keyed_container: bool = True,
+) -> None:
     """見出しの直後に「すべての項目を選択する」。コンテナ key は sel_key ごとに一意。"""
     _sync_select_all_from_children(sel_key, target_keys)
     row_key = re.sub(r"[^0-9a-zA-Z_\-]", "_", sel_key).strip("_") or "selall"
-    with st.container(key=f"wx_selall_header_{row_key}"):
+
+    def _draw() -> None:
         st.checkbox(
             "すべての項目を選択する",
             key=sel_key,
             on_change=_group_select_all_callback(sel_key, target_keys),
         )
+
+    if keyed_container:
+        with st.container(key=f"wx_selall_header_{row_key}"):
+            _draw()
+    else:
+        _draw()
 
 
 def _norm_sigwx_area(area: str) -> str:
@@ -725,47 +737,44 @@ def _render_charts_zip(cfg: dict) -> None:
     taf = cfg.get("jma_airinfo_taf")
     if isinstance(taf, dict) and taf.get("enabled"):
         with st.expander("飛行場時系列予報（結合 PDF に含める範囲）", expanded=False):
-            st.caption(
-                "空港と PART1 / PART2 を選び、「結合 PDF を生成」に反映されます。"
-                " 初期状態はすべてオフです。全空港かつ PART1+2 をオンにすると従来どおりの展開になります。"
-            )
-            prows = [
-                p
-                for p in (taf.get("products") or [])
-                if isinstance(p, dict) and str(p.get("icao") or "").strip()
-            ]
-            if not prows:
-                st.info("config の `jma_airinfo_taf.products` に ICAO を追加してください。")
-            else:
-                gfn = getattr(wx, "group_taf_products_by_region", None)
-                blocks = gfn(prows) if callable(gfn) else [("対象空港", prows)]
-                for title, plist in blocks:
-                    if not plist:
-                        continue
-                    _taf_keys: list[str] | None = None
-                    _taf_selall_key: str | None = None
-                    if title == TOHOKU_KANTO_UI_TITLE:
-                        _taf_keys = [
-                            f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
-                            for pr in plist
-                        ]
-                        _taf_selall_key = "merge_taf_selall_tohoku_kanto"
-                    elif title == KYUSHU_UI_TITLE:
-                        _taf_keys = [
-                            f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
-                            for pr in plist
-                        ]
-                        _taf_selall_key = "merge_taf_selall_kyushu"
-                    with st.container(border=True):
+            with st.container():
+                st.caption(
+                    "空港と PART1 / PART2 を選び、「結合 PDF を生成」に反映されます。"
+                    " 初期状態はすべてオフです。全空港かつ PART1+2 をオンにすると従来どおりの展開になります。"
+                )
+                prows = [
+                    p
+                    for p in (taf.get("products") or [])
+                    if isinstance(p, dict) and str(p.get("icao") or "").strip()
+                ]
+                if not prows:
+                    st.info("config の `jma_airinfo_taf.products` に ICAO を追加してください。")
+                else:
+                    gfn = getattr(wx, "group_taf_products_by_region", None)
+                    blocks = gfn(prows) if callable(gfn) else [("対象空港", prows)]
+                    for title, plist in blocks:
+                        if not plist:
+                            continue
+                        _taf_keys: list[str] | None = None
+                        _taf_selall_key: str | None = None
+                        if title == TOHOKU_KANTO_UI_TITLE:
+                            _taf_keys = [
+                                f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                                for pr in plist
+                            ]
+                            _taf_selall_key = "merge_taf_selall_tohoku_kanto"
+                        elif title == KYUSHU_UI_TITLE:
+                            _taf_keys = [
+                                f"merge_taf_ap_{str(pr.get('icao')).strip().upper()}"
+                                for pr in plist
+                            ]
+                            _taf_selall_key = "merge_taf_selall_kyushu"
                         _region_title_heading(title)
                         if _taf_keys is not None and _taf_selall_key is not None:
                             _region_select_all_header(
                                 _taf_selall_key,
                                 _taf_keys,
-                            )
-                            st.markdown(
-                                '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                                unsafe_allow_html=True,
+                                keyed_container=False,
                             )
                             cols = st.columns(3)
                             for i, pr in enumerate(plist):
@@ -788,11 +797,11 @@ def _render_charts_zip(cfg: dict) -> None:
                                         value=False,
                                         key=f"merge_taf_ap_{icao}",
                                     )
-                pc1, pc2 = st.columns(2)
-                with pc1:
-                    st.checkbox("PART1（QMCD98_）", value=False, key="merge_taf_p1")
-                with pc2:
-                    st.checkbox("PART2（QMCJ98_）", value=False, key="merge_taf_p2")
+                    pc1, pc2 = st.columns(2)
+                    with pc1:
+                        st.checkbox("PART1（QMCD98_）", value=False, key="merge_taf_p1")
+                    with pc2:
+                        st.checkbox("PART2（QMCJ98_）", value=False, key="merge_taf_p2")
 
     sigwx_cfg = cfg.get("jma_airinfo_low_level_sigwx")
     if (
@@ -801,60 +810,58 @@ def _render_charts_zip(cfg: dict) -> None:
         and not str(sigwx_cfg.get("url") or "").strip()
     ):
         with st.expander("下層悪天予想図（結合 PDF・時系列 ft=39）", expanded=False):
-            st.caption(
-                "地域を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
-                " すべてオンで従来どおり全地域を含めます。"
-            )
-            srows = _sigwx_product_rows(sigwx_cfg)
-            if not srows:
-                st.info("config の `jma_airinfo_low_level_sigwx.products` に `area` を追加してください。")
-            else:
-                sc = st.columns(min(3, max(1, len(srows))))
-                for i, sr in enumerate(srows):
-                    a = sr["area"]
-                    with sc[i % len(sc)]:
-                        st.checkbox(
-                            f"{sr['label']}（{a}）",
-                            value=False,
-                            key=f"merge_sigwx_{a}",
-                        )
+            with st.container():
+                st.caption(
+                    "地域を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
+                    " すべてオンで従来どおり全地域を含めます。"
+                )
+                srows = _sigwx_product_rows(sigwx_cfg)
+                if not srows:
+                    st.info("config の `jma_airinfo_low_level_sigwx.products` に `area` を追加してください。")
+                else:
+                    sc = st.columns(min(3, max(1, len(srows))))
+                    for i, sr in enumerate(srows):
+                        a = sr["area"]
+                        with sc[i % len(sc)]:
+                            st.checkbox(
+                                f"{sr['label']}（{a}）",
+                                value=False,
+                                key=f"merge_sigwx_{a}",
+                            )
 
     dsig_cfg = cfg.get("jma_airinfo_low_level_detailed_sigwx")
     if isinstance(dsig_cfg, dict) and dsig_cfg.get("enabled"):
         with st.expander("下層悪天予想図（詳細版）（結合 PDF）", expanded=False):
-            st.caption(
-                "県を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
-                " すべてオンで従来どおり全件を含めます。"
-            )
-            drows = _detailed_sigwx_product_rows(dsig_cfg)
-            if not drows:
-                st.info(
-                    "config の `jma_airinfo_low_level_detailed_sigwx.products` に `fig` を追加してください。"
+            with st.container():
+                st.caption(
+                    "県を選び、「結合 PDF を生成」に反映されます。初期状態はすべてオフです。"
+                    " すべてオンで従来どおり全件を含めます。"
                 )
-            else:
-                gdet = getattr(wx, "group_detailed_sigwx_rows_by_region", None)
-                dblocks = gdet(drows) if callable(gdet) else [("地域", drows)]
-                for title, dlist in dblocks:
-                    if not dlist:
-                        continue
-                    _ds_keys: list[str] | None = None
-                    _ds_selall_key: str | None = None
-                    if title == TOHOKU_KANTO_UI_TITLE:
-                        _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
-                        _ds_selall_key = "merge_dsig_selall_tohoku_kanto"
-                    elif title == KYUSHU_UI_TITLE:
-                        _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
-                        _ds_selall_key = "merge_dsig_selall_kyushu"
-                    with st.container(border=True):
+                drows = _detailed_sigwx_product_rows(dsig_cfg)
+                if not drows:
+                    st.info(
+                        "config の `jma_airinfo_low_level_detailed_sigwx.products` に `fig` を追加してください。"
+                    )
+                else:
+                    gdet = getattr(wx, "group_detailed_sigwx_rows_by_region", None)
+                    dblocks = gdet(drows) if callable(gdet) else [("地域", drows)]
+                    for title, dlist in dblocks:
+                        if not dlist:
+                            continue
+                        _ds_keys: list[str] | None = None
+                        _ds_selall_key: str | None = None
+                        if title == TOHOKU_KANTO_UI_TITLE:
+                            _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                            _ds_selall_key = "merge_dsig_selall_tohoku_kanto"
+                        elif title == KYUSHU_UI_TITLE:
+                            _ds_keys = [f"merge_dsig_{dr['fig_key']}" for dr in dlist]
+                            _ds_selall_key = "merge_dsig_selall_kyushu"
                         _region_title_heading(title)
                         if _ds_keys is not None and _ds_selall_key is not None:
                             _region_select_all_header(
                                 _ds_selall_key,
                                 _ds_keys,
-                            )
-                            st.markdown(
-                                '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                                unsafe_allow_html=True,
+                                keyed_container=False,
                             )
                             dc = st.columns(4)
                             for i, dr in enumerate(dlist):
@@ -879,34 +886,36 @@ def _render_charts_zip(cfg: dict) -> None:
     typhoon_cfg = cfg.get("jma_typhoon")
     if isinstance(typhoon_cfg, dict) and typhoon_cfg.get("enabled"):
         with st.expander("台風関連（結合 PDF）", expanded=False):
-            st.caption(
-                "資料を選び、「結合 PDF を生成」に反映されます。\n\n"
-                "注意：海水温は人工衛星とブイ・船舶による観測値から解析された解析図です。\n\n"
-                "気象庁の海水温図は毎日11時頃、前日の解析図を掲載されます。"
-            )
-            trows = _typhoon_product_rows(typhoon_cfg)
-            if not trows:
-                st.info(
-                    "config の `jma_typhoon.products` に "
-                    "`id` / `label` / `filename` を追加してください。"
+            with st.container():
+                st.caption(
+                    "資料を選び、「結合 PDF を生成」に反映されます。\n\n"
+                    "注意：海水温は人工衛星とブイ・船舶による観測値から解析された解析図です。\n\n"
+                    "気象庁の海水温図は毎日11時頃、前日の解析図を掲載されます。"
                 )
-            else:
-                t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
-                _region_select_all_header("merge_typhoon_selall", t_keys)
-                st.markdown(
-                    '<p style="margin:0.35rem 0 0.5rem 0;"></p>',
-                    unsafe_allow_html=True,
-                )
-                tc = st.columns(2)
-                for i, tr in enumerate(trows):
-                    tid = tr["id"]
-                    with tc[i % 2]:
-                        st.checkbox(
-                            str(tr["label"]).strip(),
-                            value=False,
-                            key=f"merge_typhoon_{tid}",
-                        )
+                trows = _typhoon_product_rows(typhoon_cfg)
+                if not trows:
+                    st.info(
+                        "config の `jma_typhoon.products` に "
+                        "`id` / `label` / `filename` を追加してください。"
+                    )
+                else:
+                    t_keys = [f"merge_typhoon_{tr['id']}" for tr in trows]
+                    _region_select_all_header(
+                        "merge_typhoon_selall",
+                        t_keys,
+                        keyed_container=False,
+                    )
+                    tc = st.columns(2)
+                    for i, tr in enumerate(trows):
+                        tid = tr["id"]
+                        with tc[i % 2]:
+                            st.checkbox(
+                                str(tr["label"]).strip(),
+                                value=False,
+                                key=f"merge_typhoon_{tid}",
+                            )
 
+    st.divider()
     c1, c2 = st.columns([3, 1])
     with c1:
         merge_col, refresh_col, utc_col = st.columns([2, 1, 2])
