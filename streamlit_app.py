@@ -936,14 +936,7 @@ def _render_charts_zip(cfg: dict) -> None:
                             )
                             skip_merged_pdf = True
                         else:
-                            full = (
-                                bool(sel)
-                                and set(sel) == set(all_icaos)
-                                and len(sel) == len(all_icaos)
-                                and p1
-                                and p2
-                            )
-                            merged_taf = None if full else {"icaos": sel, "part1": p1, "part2": p2}
+                            merged_taf = {"icaos": sel, "part1": p1, "part2": p2}
                 merged_sigwx_areas: list[str] | None = None
                 use_sigwx_kw = False
                 if (

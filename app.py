@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260616-99-background-refresh-30m"
+PORTAL_BUILD = "20260618-100-taf-selection-cache-key"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2358,9 +2358,9 @@ def item_fetch_cache_key(item: dict) -> str:
     elif url.startswith(WXBRIEFING_AIRINFO_TAF_MERGED):
         extra = json.dumps(
             {
-                "icao": item.get("icao"),
-                "part1": item.get("part1"),
-                "part2": item.get("part2"),
+                "icao": item.get("taf_icao"),
+                "part1": item.get("taf_include_part1"),
+                "part2": item.get("taf_include_part2"),
             },
             sort_keys=True,
             ensure_ascii=False,
