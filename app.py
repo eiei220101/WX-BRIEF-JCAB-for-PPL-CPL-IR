@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260618-102-cron-daily-refresh"
+PORTAL_BUILD = "20260618-104-materials-fetch-ui"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2472,6 +2472,14 @@ def start_wx_briefing_prefetch(cfg: dict) -> None:
                     list(ex.map(_one, http_jobs))
         with _PREFETCH_STATE_LOCK:
             _PREFETCH_STATE["running"] = False
+            done_n = int(_PREFETCH_STATE.get("done") or 0)
+            err_n = int(_PREFETCH_STATE.get("errors") or 0)
+        ok_n = max(0, done_n - err_n)
+        record_materials_fetch_stamp(
+            fetch_ok=ok_n,
+            fetch_err=err_n,
+            source="起動時取得",
+        )
 
     th = threading.Thread(target=_worker, daemon=True, name="wx-briefing-prefetch")
     _PREFETCH_THREAD = th
@@ -2683,14 +2691,19 @@ def _background_materials_refresh_cycle(cfg: dict) -> None:
     with _BACKGROUND_STATE_LOCK:
         _BACKGROUND_STATE["refresh_running"] = True
     try:
-        run_materials_refresh_job(cfg)
+        run_materials_refresh_job(cfg, source="自動更新（スケジュール）")
     finally:
         with _BACKGROUND_STATE_LOCK:
             _BACKGROUND_STATE["refresh_running"] = False
         _BACKGROUND_REFRESH_LOCK.release()
 
 
-def run_materials_refresh_job(cfg: dict | None = None, *, prebuild_merged: bool | None = None) -> dict:
+def run_materials_refresh_job(
+    cfg: dict | None = None,
+    *,
+    prebuild_merged: bool | None = None,
+    source: str = "自動更新",
+) -> dict:
     """
     全資料を再取得し、必要なら結合 PDF を温める。CLI / cron / HTTP 内部 API 用。
     結果は ``data/last_materials_refresh.json`` にも書き出す。
@@ -2707,18 +2720,48 @@ def run_materials_refresh_job(cfg: dict | None = None, *, prebuild_merged: bool 
             live,
             force_refresh=True,
         )
-    ts_jst = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
-    ts_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    summary = record_materials_fetch_stamp(
+        fetch_ok=ok,
+        fetch_err=err,
+        source=source,
+        merged_pages=merged_pages,
+        notes=notes,
+        merged_errs=merged_errs,
+        merged_warns=merged_warns,
+        portal_build=PORTAL_BUILD,
+    )
+    return summary
+
+
+def record_materials_fetch_stamp(
+    *,
+    fetch_ok: int,
+    fetch_err: int,
+    source: str,
+    merged_pages: int = 0,
+    notes: list[str] | None = None,
+    merged_errs: list[str] | None = None,
+    merged_warns: list[str] | None = None,
+    portal_build: str | None = None,
+    at: datetime | None = None,
+) -> dict:
+    """資料一括取得の完了時刻を記録（画面表示・data/last_materials_refresh.json）。"""
+    when = at or datetime.now(JST)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=JST)
+    ts_jst = when.astimezone(JST).strftime("%Y-%m-%d %H:%M JST")
+    ts_utc = when.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
     summary: dict = {
         "at_jst": ts_jst,
         "at_utc": ts_utc,
-        "fetch_ok": ok,
-        "fetch_err": err,
-        "merged_pages": merged_pages,
-        "notes": list(notes[:20]),
-        "merged_errs": list(merged_errs[:10]),
-        "merged_warns": list(merged_warns[:10]),
-        "portal_build": PORTAL_BUILD,
+        "source": str(source or "").strip() or "取得",
+        "fetch_ok": int(fetch_ok),
+        "fetch_err": int(fetch_err),
+        "merged_pages": int(merged_pages),
+        "notes": list(notes or [])[:20],
+        "merged_errs": list(merged_errs or [])[:10],
+        "merged_warns": list(merged_warns or [])[:10],
+        "portal_build": str(portal_build or PORTAL_BUILD),
     }
     try:
         MATERIALS_REFRESH_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2730,9 +2773,108 @@ def run_materials_refresh_job(cfg: dict | None = None, *, prebuild_merged: bool 
         pass
     with _BACKGROUND_STATE_LOCK:
         _BACKGROUND_STATE["last_refresh_utc"] = ts_utc
-        if prebuild_merged and merged_pages:
+        if merged_pages:
             _BACKGROUND_STATE["last_merged_pdf_utc"] = ts_utc
     return summary
+
+
+def _read_materials_fetch_stamp_file() -> dict | None:
+    try:
+        raw = MATERIALS_REFRESH_STAMP_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _parse_fetch_stamp_utc(stamp: dict) -> datetime | None:
+    raw = str(stamp.get("at_utc") or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%d %H:%M UTC").replace(tzinfo=UTC)
+        return dt
+    except ValueError:
+        return None
+
+
+def materials_fetch_status() -> dict:
+    """
+    画面表示用: いまのプロセス／stamp ファイルから資料取得時刻を返す。
+    keys: at_jst, at_utc, source, fetch_ok, fetch_err, in_progress
+    """
+    best: dict | None = None
+    best_dt: datetime | None = None
+
+    file_stamp = _read_materials_fetch_stamp_file()
+    if file_stamp:
+        dt = _parse_fetch_stamp_utc(file_stamp)
+        if dt is not None:
+            best = file_stamp
+            best_dt = dt
+
+    with _BACKGROUND_STATE_LOCK:
+        mem_utc = str(_BACKGROUND_STATE.get("last_refresh_utc") or "").strip()
+    if mem_utc:
+        try:
+            dt = datetime.strptime(mem_utc, "%Y-%m-%d %H:%M UTC").replace(tzinfo=UTC)
+            if best_dt is None or dt > best_dt:
+                best_dt = dt
+                best = {
+                    "at_jst": dt.astimezone(JST).strftime("%Y-%m-%d %H:%M JST"),
+                    "at_utc": mem_utc,
+                    "source": "このプロセス内",
+                    "fetch_ok": 0,
+                    "fetch_err": 0,
+                }
+        except ValueError:
+            pass
+
+    pf = prefetch_status_snapshot()
+    with _BACKGROUND_STATE_LOCK:
+        refresh_running = bool(_BACKGROUND_STATE.get("refresh_running"))
+    in_progress = bool(pf.get("running")) or refresh_running
+
+    if best is None:
+        return {
+            "at_jst": "",
+            "at_utc": "",
+            "source": "",
+            "fetch_ok": 0,
+            "fetch_err": 0,
+            "in_progress": in_progress,
+        }
+
+    return {
+        "at_jst": str(best.get("at_jst") or ""),
+        "at_utc": str(best.get("at_utc") or ""),
+        "source": str(best.get("source") or ""),
+        "fetch_ok": int(best.get("fetch_ok") or 0),
+        "fetch_err": int(best.get("fetch_err") or 0),
+        "merged_pages": int(best.get("merged_pages") or 0),
+        "in_progress": in_progress,
+    }
+
+
+def materials_fetch_status_line() -> str:
+    """資料取得時刻の1行テキスト（プレーン）。"""
+    s = materials_fetch_status()
+    if s.get("in_progress") and not s.get("at_jst"):
+        return "資料を取得中…"
+    if not s.get("at_jst"):
+        return "資料取得時刻: 未取得（起動直後など）"
+    parts = [f"資料取得: {s['at_jst']}"]
+    if s.get("source"):
+        parts.append(f"（{s['source']}）")
+    ok = int(s.get("fetch_ok") or 0)
+    err = int(s.get("fetch_err") or 0)
+    if ok or err:
+        parts.append(f"— {ok} 件成功")
+        if err:
+            parts.append(f" / {err} 件失敗")
+    if s.get("in_progress"):
+        parts.append("— 追加取得中…")
+    return " ".join(parts)
 
 
 def _cron_refresh_secret(cfg: dict) -> str:
@@ -5505,6 +5647,7 @@ def page_html(cfg: dict) -> str:
         f"資料一覧（{n_valid}件）" if n_valid else "資料一覧"
     )
     build_e = html.escape(portal_build_stamp())
+    fetch_line_e = html.escape(materials_fetch_status_line())
     app_path_e = html.escape(str(Path(__file__).resolve()))
     metar_taf_block = html_metar_taf_panel(cfg)
     metar_taf_section = ""
@@ -5566,6 +5709,16 @@ def page_html(cfg: dict) -> str:
       letter-spacing: -0.02em;
     }}
     .lead {{ color: var(--muted); margin: 0; font-size: 0.98rem; max-width: 36rem; }}
+    .fetch-strip {{
+      margin: 0.85rem 0 0;
+      padding: 0.65rem 0.9rem;
+      background: var(--surface2);
+      border-left: 3px solid var(--accent);
+      border-radius: 8px;
+      font-size: 0.95rem;
+      color: var(--text);
+      max-width: 42rem;
+    }}
     .card {{
       background: var(--card); border: 1px solid var(--border);
       border-radius: 12px; padding: 1.25rem 1.35rem;
@@ -5721,6 +5874,7 @@ def page_html(cfg: dict) -> str:
       </div>
       <h1>{title_e}</h1>
       <p class="lead">config.json の内容どおりに取り込み、1本のPDFにまとめます。</p>
+      <p class="fetch-strip"><strong>{fetch_line_e}</strong></p>
     </header>
 
     {metar_taf_section}
@@ -5980,7 +6134,7 @@ class Handler(BaseHTTPRequestHandler):
         if not cron_refresh_authorized(client, cfg, token=tok, header=hdr):
             self.send_error(403, "Forbidden")
             return
-        summary = run_materials_refresh_job(cfg)
+        summary = run_materials_refresh_job(cfg, source="cron/launchd")
         body = json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")

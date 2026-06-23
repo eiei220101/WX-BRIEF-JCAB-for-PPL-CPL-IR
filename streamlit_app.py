@@ -371,6 +371,43 @@ def _inject_wx_streamlit_ui_styles() -> None:
     )
 
 
+def _materials_fetch_status() -> dict:
+    fn = getattr(wx, "materials_fetch_status", None)
+    if callable(fn):
+        try:
+            raw = fn()
+            if isinstance(raw, dict):
+                return raw
+        except Exception:  # noqa: BLE001
+            pass
+    return {}
+
+
+def _materials_fetch_status_line() -> str:
+    fn = getattr(wx, "materials_fetch_status_line", None)
+    if callable(fn):
+        try:
+            return str(fn())
+        except Exception:  # noqa: BLE001
+            pass
+    return "資料取得時刻: 不明"
+
+
+def _render_materials_fetch_banner() -> None:
+    line = _materials_fetch_status_line()
+    s = _materials_fetch_status()
+    if s.get("in_progress") and not s.get("at_jst"):
+        st.info(line)
+    elif not s.get("at_jst"):
+        st.warning(line)
+    else:
+        st.info(line)
+
+
+def _now_jst_label() -> str:
+    return datetime.now(wx.JST).strftime("%Y-%m-%d %H:%M JST")
+
+
 def _wx_build_display() -> str:
     """キャプション用の短いビルド行（PORTAL_BUILD | app.py UTC）。古い app.py では PORTAL_BUILD のみ。"""
     fn = getattr(wx, "portal_build_short_stamp", None)
@@ -469,14 +506,9 @@ def _render_runtime_sidebar() -> None:
                     st.caption(f"最終自動取得: {bg['last_refresh_utc']}")
                 if bg.get("last_merged_pdf_utc"):
                     st.caption(f"結合PDF温め: {bg['last_merged_pdf_utc']}")
-        stamp_path = _ROOT / "data" / "last_materials_refresh.json"
-        if stamp_path.is_file():
-            try:
-                stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-                if isinstance(stamp, dict) and stamp.get("at_jst"):
-                    st.caption(f"cron/launchd 最終更新: {stamp['at_jst']}")
-            except (OSError, json.JSONDecodeError):
-                pass
+        fetch_line = _materials_fetch_status_line()
+        if fetch_line:
+            st.caption(fetch_line)
         st.caption(
             "変更が反映されないとき: ①上の app.py パスが編集したフォルダか "
             "②結合PDFを再生成したか ③Streamlit を再起動したか を確認。"
@@ -918,7 +950,7 @@ def _render_charts_zip(cfg: dict) -> None:
     st.divider()
     c1, c2 = st.columns([3, 1])
     with c1:
-        merge_col, refresh_col, utc_col = st.columns([2, 1, 2])
+        merge_col, refresh_col = st.columns([2, 1])
         with merge_col:
             if st.button("結合 PDF を生成", type="primary", key="btn_merged"):
                 cfg_live = wx.load_config()
@@ -1047,14 +1079,11 @@ def _render_charts_zip(cfg: dict) -> None:
                     st.session_state["_merged_errs"] = errs
                     st.session_state["_merged_warns"] = warns
                     st.session_state["_merged_pdf_build"] = str(getattr(wx, "PORTAL_BUILD", ""))
+                    st.session_state["_merged_pdf_at_jst"] = _now_jst_label()
         with refresh_col:
             if st.button("資料を更新", type="secondary", key="btn_refresh_charts"):
                 _request_materials_refresh()
                 st.rerun()
-        with utc_col:
-            charts_refreshed_at_utc = st.session_state.get("_charts_refreshed_at_utc")
-            if charts_refreshed_at_utc:
-                st.caption(f"再取得: {charts_refreshed_at_utc}")
     with c2:
         if st.button("ZIP を生成", key="btn_zip"):
             _clear_individual_item_caches()
@@ -1064,6 +1093,7 @@ def _render_charts_zip(cfg: dict) -> None:
             st.session_state["_zip_ok"] = ok
             st.session_state["_zip_errs"] = errs
             st.session_state["_zip_warns"] = warns
+            st.session_state["_zip_at_jst"] = _now_jst_label()
 
     if st.session_state.get("_merged_pdf"):
         b = st.session_state["_merged_pdf"]
@@ -1076,7 +1106,14 @@ def _render_charts_zip(cfg: dict) -> None:
                 f" 現在のコードは {cur_build} です。「結合 PDF を生成」を押して再生成してください。"
             )
         if b:
-            st.success(f"結合 PDF 準備完了（約 {pgs} ページ）")
+            gen_at = st.session_state.get("_merged_pdf_at_jst") or ""
+            fetch_at = _materials_fetch_status().get("at_jst") or ""
+            msg = f"結合 PDF 準備完了（約 {pgs} ページ）"
+            if gen_at:
+                msg += f" — 生成: {gen_at}"
+            st.success(msg)
+            if fetch_at:
+                st.caption(f"PDF に含まれる資料の取得: {fetch_at}")
             st.download_button(
                 "wx_briefing_merged.pdf をダウンロード",
                 data=b,
@@ -1092,7 +1129,14 @@ def _render_charts_zip(cfg: dict) -> None:
     if st.session_state.get("_zip") is not None:
         zb = st.session_state["_zip"]
         ok = st.session_state.get("_zip_ok", 0)
-        st.success(f"ZIP 準備完了（{ok} 件入り）")
+        zip_at = st.session_state.get("_zip_at_jst") or ""
+        fetch_at = _materials_fetch_status().get("at_jst") or ""
+        msg = f"ZIP 準備完了（{ok} 件入り）"
+        if zip_at:
+            msg += f" — 生成: {zip_at}"
+        st.success(msg)
+        if fetch_at:
+            st.caption(f"ZIP に含まれる資料の取得: {fetch_at}")
         st.download_button(
             "wx_briefing_latest.zip をダウンロード",
             data=zb,
@@ -1157,23 +1201,41 @@ def _run_materials_refresh_if_requested() -> None:
         return
     _clear_stored_material_outputs()
     _clear_individual_item_caches()
-    refetch_fn = getattr(wx, "refetch_all_download_items", None)
+    refresh_fn = getattr(wx, "run_materials_refresh_job", None)
     ok, err, notes = 0, 0, []
+    ts = ""
+    ts_jst = ""
     with st.spinner("全資料を再取得中…（時間がかかることがあります）"):
-        if callable(refetch_fn):
-            ok, err, notes = refetch_fn(wx.load_config())
+        if callable(refresh_fn):
+            summary = refresh_fn(
+                wx.load_config(),
+                prebuild_merged=False,
+                source="手動（資料を更新）",
+            )
+            ok = int(summary.get("fetch_ok") or 0)
+            err = int(summary.get("fetch_err") or 0)
+            notes = list(summary.get("notes") or [])
+            ts = str(summary.get("at_utc") or "")
+            ts_jst = str(summary.get("at_jst") or "")
         else:
-            wx.clear_fetch_bytes_cache()
-    ts = datetime.now(wx.UTC).strftime("%Y-%m-%d %H:%M UTC")
-    st.session_state["_charts_refreshed_at_utc"] = ts
-    st.session_state["_items_refreshed_at_utc"] = ts
+            refetch_fn = getattr(wx, "refetch_all_download_items", None)
+            if callable(refetch_fn):
+                ok, err, notes = refetch_fn(wx.load_config())
+            else:
+                wx.clear_fetch_bytes_cache()
+            ts = datetime.now(wx.UTC).strftime("%Y-%m-%d %H:%M UTC")
+            ts_jst = datetime.now(wx.JST).strftime("%Y-%m-%d %H:%M JST")
+    if ts:
+        st.session_state["_charts_refreshed_at_utc"] = ts
+        st.session_state["_items_refreshed_at_utc"] = ts
     st.session_state["_items_expanded_after_refresh"] = True
     st.session_state["_materials_just_refetched"] = True
+    when = ts_jst or ts
     if ok or err:
         if err:
-            st.warning(f"資料の再取得: {ok} 件成功、{err} 件失敗")
+            st.warning(f"資料の再取得: {ok} 件成功、{err} 件失敗（{when}）")
         else:
-            st.success(f"資料の再取得: {ok} 件を更新しました（{ts}）")
+            st.success(f"資料の再取得: {ok} 件を更新しました（{when}）")
     for note in notes[:8]:
         st.caption(f"⚠ {note}")
     if len(notes) > 8:
@@ -1216,9 +1278,9 @@ def _render_file_list(cfg: dict) -> None:
             _request_materials_refresh()
             st.rerun()
     with note_col:
-        refreshed_at_utc = st.session_state.get("_items_refreshed_at_utc")
-        if refreshed_at_utc:
-            st.caption(f"再取得: {refreshed_at_utc}")
+        fetch_at = _materials_fetch_status().get("at_jst")
+        if fetch_at:
+            st.caption(f"資料取得: {fetch_at}")
     expand_after_refresh = bool(st.session_state.pop("_items_expanded_after_refresh", False))
     with st.expander("展開", expanded=expand_after_refresh):
         _render_individual_download_rows(items)
@@ -1240,6 +1302,7 @@ def main() -> None:
     title = cfg.get("title") or "WX Briefing"
     st.title(str(title))
     st.caption(f"ビルド: {_wx_build_display()}　15期　Ishikawa")
+    _render_materials_fetch_banner()
     for _rw in _runtime_health_warnings():
         st.warning(_rw)
 
