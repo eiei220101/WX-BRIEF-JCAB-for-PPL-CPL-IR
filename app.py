@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260618-104-materials-fetch-ui"
+PORTAL_BUILD = "20260618-105-merged-pdf-fresh-items"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -3151,7 +3151,62 @@ def _merged_pdf_item_to_pdf_bytes(
     return i, None, errors, warnings
 
 
-def _merged_pdf_fetch_one(ix_item: tuple[int, dict]) -> tuple[int, dict, str, str, bytes | None, str | None, str | None]:
+def _merged_pdf_fresh_spec_active(fresh: dict | None) -> bool:
+    """Streamlit 等から渡された「ユーザー選択で最新取得」指定が有効か。"""
+    if not isinstance(fresh, dict):
+        return False
+    return any(
+        bool(fresh.get(k))
+        for k in ("taf_active", "sigwx_active", "detailed_active", "typhoon_active")
+    )
+
+
+def _merged_pdf_skip_ready_cache(cfg: dict, fresh: dict | None) -> bool:
+    """
+    結合 PDF 完成品キャッシュを使わない。
+    衛星・レーダー、またはユーザーがチェックしたカテゴリを含む生成では常に組み直す。
+    """
+    if _merged_pdf_fresh_spec_active(fresh):
+        return True
+    msc = cfg.get("jma_msc_himawari_japan")
+    if isinstance(msc, dict) and msc.get("enabled"):
+        return True
+    zm = cfg.get("jma_nowc_hrpns_mosaic")
+    if isinstance(zm, dict) and zm.get("enabled"):
+        return True
+    return False
+
+
+def _item_merged_pdf_skip_fetch_cache(item: dict, fresh: dict | None) -> bool:
+    """
+    結合 PDF 生成時に資料バイト列キャッシュを使わず最新を取り直す item か。
+    衛星（可視・赤外）・レーダーエコーは常に最新。ユーザーが選んだ TAF / SIGWX 等も同様。
+    """
+    url = str(item.get("url") or "")
+    if url.startswith(
+        (WXBRIEFING_HIMI_JP_MOSAIC, WXBRIEFING_HIMI_JP_MAP_SCREENSHOT)
+    ) or url.startswith(WXBRIEFING_HRPNS_MOSAIC):
+        return True
+    if "jma.go.jp/bosai/himawari/data/satimg" in url:
+        return True
+    if not isinstance(fresh, dict):
+        return False
+    if fresh.get("taf_active") and url.startswith(WXBRIEFING_AIRINFO_TAF_MERGED):
+        return True
+    if fresh.get("sigwx_active") and JMA_AIRINFO_LOW_LEVEL_SIGWX_BASE in url:
+        return True
+    if fresh.get("detailed_active") and JMA_AIRINFO_DETAILED_SIGWX_BASE in url:
+        return True
+    if fresh.get("typhoon_active") and item.get("typhoon_product_id"):
+        return True
+    return False
+
+
+def _merged_pdf_fetch_one(
+    ix_item: tuple[int, dict],
+    *,
+    fresh: dict | None = None,
+) -> tuple[int, dict, str, str, bytes | None, str | None, str | None]:
     """
     結合 PDF 用の 1 件取得。戻り値:
     (index, item, name, kind, data, ctype, message)
@@ -3173,8 +3228,16 @@ def _merged_pdf_fetch_one(ix_item: tuple[int, dict]) -> tuple[int, dict, str, st
             None,
             f"{name}: SVG は結合対象外のためスキップしました",
         )
+    skip_cache = _item_merged_pdf_skip_fetch_cache(item, fresh)
+    if skip_cache:
+        u = str(url or "")
+        if u.startswith(WXBRIEFING_HIMI_JP_MOSAIC) or u.startswith(
+            WXBRIEFING_HIMI_JP_MAP_SCREENSHOT
+        ) or "jma.go.jp/bosai/himawari/data/satimg" in u:
+            global _himawari_jp_times_cache
+            _himawari_jp_times_cache = None
     try:
-        data, ctype = fetch_item_bytes(item)
+        data, ctype = fetch_item_bytes(item, use_cache=not skip_cache)
         return i, item, name, "ok", data, ctype, None
     except urllib.error.HTTPError as e:
         return i, item, name, "err", None, None, f"{name}: HTTP {e.code}"
@@ -4130,6 +4193,7 @@ def expand_download_items(
                             "filename": fn,
                             "url": WXBRIEFING_PAGE_SCREENSHOT,
                             "page_screenshot": snap_opts,
+                            "typhoon_product_id": pid,
                             "comment": comment,
                         }
                     )
@@ -4141,6 +4205,7 @@ def expand_download_items(
                         {
                             "filename": fn,
                             "url": url_direct,
+                            "typhoon_product_id": pid,
                             "comment": comment,
                         }
                     )
@@ -4697,6 +4762,7 @@ def build_merged_pdf(
     merged_sigwx_areas: list[str] | None = None,
     merged_detailed_sigwx_figs: list[str] | None = None,
     merged_typhoon_ids: list[str] | None = None,
+    merged_pdf_fresh: dict | None = None,
 ) -> tuple[bytes, list[str], list[str], int]:
     """
     取得対象をすべて取得し、1つの PDF に連結する。
@@ -4714,8 +4780,11 @@ def build_merged_pdf(
 
     merged_typhoon_ids: 台風関連（jma_typhoon.products）を結合 PDF だけで絞るとき。
 
-    起動時 prefetch や「資料の更新」で温めた取得キャッシュ（TTL 約10分）を再利用する。
-    毎回キャッシュを破棄しないため、2回目以降の生成は大幅に短くなることが多い。
+    merged_pdf_fresh: Streamlit 等から「ユーザーがチェックしたカテゴリは最新取得」の指定。
+        ``taf_active`` / ``sigwx_active`` / ``detailed_active`` / ``typhoon_active`` の bool。
+
+    衛星（可視・赤外）とレーダーエコーは merged_pdf_fresh なしでも結合 PDF 生成時は常に最新取得。
+    起動時 prefetch や「資料を更新」のキャッシュは、上記以外の資料向け。
     """
     try:
         from pypdf import PdfReader, PdfWriter
@@ -4746,14 +4815,19 @@ def build_merged_pdf(
     pw_jobs = [job for job in fetch_jobs if _item_needs_playwright(job[1])]
     http_jobs = [job for job in fetch_jobs if not _item_needs_playwright(job[1])]
     fetched_rows: list[tuple[int, dict, str, str, bytes | None, str | None, str | None]] = []
+    fresh = merged_pdf_fresh if isinstance(merged_pdf_fresh, dict) else None
     for job in pw_jobs:
-        fetched_rows.append(_merged_pdf_fetch_one(job))
+        fetched_rows.append(_merged_pdf_fetch_one(job, fresh=fresh))
     max_w = _merged_pdf_max_fetch_workers(cfg, len(http_jobs))
     if max_w <= 1 or len(http_jobs) <= 1:
-        fetched_rows.extend(_merged_pdf_fetch_one(job) for job in http_jobs)
+        fetched_rows.extend(
+            _merged_pdf_fetch_one(job, fresh=fresh) for job in http_jobs
+        )
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_w) as ex:
-            fetched_rows.extend(ex.map(_merged_pdf_fetch_one, http_jobs))
+            fetched_rows.extend(
+                ex.map(lambda j: _merged_pdf_fetch_one(j, fresh=fresh), http_jobs)
+            )
     fetched_rows.sort(key=lambda row: row[0])
 
     ok_rows = [row for row in fetched_rows if row[3] == "ok" and row[4] is not None]
@@ -4809,6 +4883,7 @@ def build_merged_pdf_cached(
     merged_sigwx_areas: list[str] | None = None,
     merged_detailed_sigwx_figs: list[str] | None = None,
     merged_typhoon_ids: list[str] | None = None,
+    merged_pdf_fresh: dict | None = None,
 ) -> tuple[bytes, list[str], list[str], int]:
     """
     結合 PDF を返す。同一選択・ビルドでキャッシュが新しければ即返す。
@@ -4819,11 +4894,13 @@ def build_merged_pdf_cached(
         "merged_sigwx_areas": merged_sigwx_areas,
         "merged_detailed_sigwx_figs": merged_detailed_sigwx_figs,
         "merged_typhoon_ids": merged_typhoon_ids,
+        "merged_pdf_fresh": merged_pdf_fresh,
     }
     key = _merged_pdf_cache_key(cfg, **pdf_kw)
     ttl = _merged_pdf_cache_ttl_sec(cfg)
     now = time.time()
-    if not force_refresh:
+    skip_ready = force_refresh or _merged_pdf_skip_ready_cache(cfg, merged_pdf_fresh)
+    if not skip_ready:
         with _MERGED_PDF_READY_CACHE_LOCK:
             hit = _MERGED_PDF_READY_CACHE.get(key)
         if hit is not None:

@@ -408,6 +408,31 @@ def _now_jst_label() -> str:
     return datetime.now(wx.JST).strftime("%Y-%m-%d %H:%M JST")
 
 
+def _merged_pdf_fresh_spec(
+    *,
+    merged_taf: dict | None,
+    sigwx_checked: list[str] | None,
+    detailed_checked: list[str] | None,
+    typhoon_checked: list[str] | None,
+) -> dict[str, bool]:
+    """
+    結合 PDF 生成時に最新取得するカテゴリ（ユーザーがチェックした項目）。
+    衛星・レーダーは app.py 側で常に最新取得。
+    """
+    taf_active = False
+    if isinstance(merged_taf, dict):
+        icaos = merged_taf.get("icaos")
+        taf_active = bool(icaos) or bool(merged_taf.get("part1")) or bool(
+            merged_taf.get("part2")
+        )
+    return {
+        "taf_active": taf_active,
+        "sigwx_active": bool(sigwx_checked),
+        "detailed_active": bool(detailed_checked),
+        "typhoon_active": bool(typhoon_checked),
+    }
+
+
 def _wx_build_display() -> str:
     """キャプション用の短いビルド行（PORTAL_BUILD | app.py UTC）。古い app.py では PORTAL_BUILD のみ。"""
     fn = getattr(wx, "portal_build_short_stamp", None)
@@ -999,6 +1024,7 @@ def _render_charts_zip(cfg: dict) -> None:
                         sel_sa = [
                             a for a in all_sa if st.session_state.get(f"merge_sigwx_{a}", False)
                         ]
+                        sel_sigwx = list(sel_sa)
                         if not sel_sa:
                             merged_sigwx_areas = []
                             use_sigwx_kw = True
@@ -1016,6 +1042,7 @@ def _render_charts_zip(cfg: dict) -> None:
                             for fk in all_fk
                             if st.session_state.get(f"merge_dsig_{fk}", False)
                         ]
+                        sel_detailed = list(sel_fk)
                         if not sel_fk:
                             merged_detailed_figs = []
                             use_det_kw = True
@@ -1026,6 +1053,9 @@ def _render_charts_zip(cfg: dict) -> None:
                 use_typhoon_kw = False
                 sel_typhoon_for_warn: list[str] = []
                 trows_m: list[dict] = []
+                sel_sigwx: list[str] = []
+                sel_detailed: list[str] = []
+                sel_typhoon: list[str] = []
                 if isinstance(typhoon_cfg_live, dict) and typhoon_cfg_live.get("enabled"):
                     trows_m = _typhoon_product_rows(typhoon_cfg_live)
                     if trows_m:
@@ -1035,6 +1065,7 @@ def _render_charts_zip(cfg: dict) -> None:
                             for tid in all_tid
                             if st.session_state.get(f"merge_typhoon_{tid}", False)
                         ]
+                        sel_typhoon = list(sel_tid)
                         sel_typhoon_for_warn = sel_tid
                         if not sel_tid:
                             merged_typhoon_ids = []
@@ -1066,6 +1097,12 @@ def _render_charts_zip(cfg: dict) -> None:
                         pdf_kw["merged_detailed_sigwx_figs"] = merged_detailed_figs
                     if use_typhoon_kw:
                         pdf_kw["merged_typhoon_ids"] = merged_typhoon_ids
+                    pdf_kw["merged_pdf_fresh"] = _merged_pdf_fresh_spec(
+                        merged_taf=merged_taf,
+                        sigwx_checked=sel_sigwx,
+                        detailed_checked=sel_detailed,
+                        typhoon_checked=sel_typhoon,
+                    )
                     build_fn = getattr(wx, "build_merged_pdf_cached", None) or wx.build_merged_pdf
                     with st.spinner("取得・結合中（キャッシュがあれば数秒）…"):
                         try:
