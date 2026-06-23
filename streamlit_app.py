@@ -11,6 +11,7 @@ Streamlit 版 WX Briefing（app.py のロジックを再利用）。
 from __future__ import annotations
 
 import html
+import json
 import os
 import re
 import sys
@@ -452,14 +453,30 @@ def _render_runtime_sidebar() -> None:
         if callable(bg_fn):
             bg = bg_fn()
             if bg.get("scheduler_running"):
-                iv = bg.get("interval_minutes") or "?"
-                st.caption(f"自動更新: {iv} 分ごと（バックグラウンド）")
+                daily = bg.get("daily_refresh_jst") or ""
+                iv = bg.get("interval_minutes") or 0
+                if daily and iv:
+                    st.caption(f"自動更新: 毎日 {daily} ＋ {iv} 分ごと")
+                elif daily:
+                    st.caption(f"自動更新: 毎日 {daily}")
+                elif iv:
+                    st.caption(f"自動更新: {iv} 分ごと")
+                if bg.get("next_refresh_jst"):
+                    st.caption(f"次回更新予定: {bg['next_refresh_jst']}")
                 if bg.get("refresh_running"):
                     st.caption("いま資料を自動取得中…")
                 if bg.get("last_refresh_utc"):
                     st.caption(f"最終自動取得: {bg['last_refresh_utc']}")
                 if bg.get("last_merged_pdf_utc"):
                     st.caption(f"結合PDF温め: {bg['last_merged_pdf_utc']}")
+        stamp_path = _ROOT / "data" / "last_materials_refresh.json"
+        if stamp_path.is_file():
+            try:
+                stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+                if isinstance(stamp, dict) and stamp.get("at_jst"):
+                    st.caption(f"cron/launchd 最終更新: {stamp['at_jst']}")
+            except (OSError, json.JSONDecodeError):
+                pass
         st.caption(
             "変更が反映されないとき: ①上の app.py パスが編集したフォルダか "
             "②結合PDFを再生成したか ③Streamlit を再起動したか を確認。"

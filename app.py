@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260618-100-taf-selection-cache-key"
+PORTAL_BUILD = "20260618-102-cron-daily-refresh"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -2329,12 +2329,15 @@ _BACKGROUND_STATE: dict = {
     "last_refresh_utc": "",
     "last_merged_pdf_utc": "",
     "interval_minutes": 0,
+    "daily_refresh_jst": "",
+    "next_refresh_jst": "",
 }
 _BACKGROUND_STATE_LOCK = threading.Lock()
 _BACKGROUND_REFRESH_LOCK = threading.Lock()
 _SCHEDULER_THREAD: threading.Thread | None = None
 _MERGED_PDF_READY_CACHE: dict[str, tuple[float, bytes, list[str], list[str], int]] = {}
 _MERGED_PDF_READY_CACHE_LOCK = threading.Lock()
+MATERIALS_REFRESH_STAMP_PATH = _PORTAL_APP_PATH.parent / "data" / "last_materials_refresh.json"
 
 
 def item_fetch_cache_key(item: dict) -> str:
@@ -2558,6 +2561,70 @@ def _background_refresh_interval_min(cfg: dict) -> int:
     return max(0, min(180, m))
 
 
+def _parse_daily_refresh_jst(cfg: dict) -> tuple[int, int] | None:
+    """
+    merged_pdf.daily_refresh_jst（例: "08:00"）を (時, 分) にパース。無効・未設定は None。
+    """
+    raw = _merged_pdf_block(cfg).get("daily_refresh_jst")
+    if raw is None or raw is False:
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in ("off", "false", "none", "0", "disable", "disabled"):
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def _daily_refresh_jst_label(hour: int, minute: int) -> str:
+    return f"{hour:02d}:{minute:02d} JST"
+
+
+def _seconds_until_next_jst(hour: int, minute: int) -> float:
+    """次に指定 JST 時刻になるまでの秒数（最低 1 秒）。"""
+    now = datetime.now(JST)
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return max(1.0, (target - now).total_seconds())
+
+
+def _next_refresh_jst_label(cfg: dict) -> str:
+    """次回バックグラウンド更新の JST 表示（interval / daily の早い方）。"""
+    waits: list[tuple[float, str]] = []
+    interval_min = _background_refresh_interval_min(cfg)
+    if interval_min > 0:
+        at = datetime.now(JST) + timedelta(seconds=interval_min * 60.0)
+        waits.append((interval_min * 60.0, at.strftime("%Y-%m-%d %H:%M JST")))
+    daily = _parse_daily_refresh_jst(cfg)
+    if daily:
+        sec = _seconds_until_next_jst(*daily)
+        at = datetime.now(JST) + timedelta(seconds=sec)
+        waits.append((sec, at.strftime("%Y-%m-%d %H:%M JST")))
+    if not waits:
+        return ""
+    waits.sort(key=lambda x: x[0])
+    return waits[0][1]
+
+
+def _scheduler_sleep_seconds(cfg: dict) -> float:
+    """次のバックグラウンド更新までの待機秒数（interval と daily の早い方）。"""
+    waits: list[float] = []
+    interval_min = _background_refresh_interval_min(cfg)
+    if interval_min > 0:
+        waits.append(float(interval_min) * 60.0)
+    daily = _parse_daily_refresh_jst(cfg)
+    if daily:
+        waits.append(_seconds_until_next_jst(*daily))
+    if not waits:
+        return 86400.0
+    return min(waits)
+
+
 def _merged_pdf_prebuild_enabled(cfg: dict) -> bool:
     block = _merged_pdf_block(cfg)
     if "prebuild_merged_pdf" in block:
@@ -2594,47 +2661,116 @@ def _merged_pdf_cache_key(cfg: dict, **kwargs) -> str:
 
 def background_refresh_snapshot() -> dict:
     """Streamlit 表示用: バックグラウンド自動更新の状態。"""
+    cfg = load_config()
+    daily = _parse_daily_refresh_jst(cfg)
     with _BACKGROUND_STATE_LOCK:
-        return {
+        snap = {
             "scheduler_running": bool(_BACKGROUND_STATE.get("scheduler_running")),
             "refresh_running": bool(_BACKGROUND_STATE.get("refresh_running")),
             "last_refresh_utc": str(_BACKGROUND_STATE.get("last_refresh_utc") or ""),
             "last_merged_pdf_utc": str(_BACKGROUND_STATE.get("last_merged_pdf_utc") or ""),
             "interval_minutes": int(_BACKGROUND_STATE.get("interval_minutes") or 0),
+            "daily_refresh_jst": _daily_refresh_jst_label(*daily) if daily else "",
+            "next_refresh_jst": _next_refresh_jst_label(cfg),
         }
+    return snap
 
 
 def _background_materials_refresh_cycle(cfg: dict) -> None:
-    """全資料の再取得と（有効時）結合 PDF の事前生成。"""
+    """全資料の再取得と（有効時）結合 PDF の事前生成（バックグラウンド・非ブロッキング）。"""
     if not _BACKGROUND_REFRESH_LOCK.acquire(blocking=False):
         return
     with _BACKGROUND_STATE_LOCK:
         _BACKGROUND_STATE["refresh_running"] = True
     try:
-        refetch_all_download_items(cfg)
-        ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
-        with _BACKGROUND_STATE_LOCK:
-            _BACKGROUND_STATE["last_refresh_utc"] = ts
-        if _merged_pdf_prebuild_enabled(cfg):
-            build_merged_pdf_cached(cfg, force_refresh=True)
-            with _BACKGROUND_STATE_LOCK:
-                _BACKGROUND_STATE["last_merged_pdf_utc"] = datetime.now(UTC).strftime(
-                    "%Y-%m-%d %H:%M UTC"
-                )
+        run_materials_refresh_job(cfg)
     finally:
         with _BACKGROUND_STATE_LOCK:
             _BACKGROUND_STATE["refresh_running"] = False
         _BACKGROUND_REFRESH_LOCK.release()
 
 
+def run_materials_refresh_job(cfg: dict | None = None, *, prebuild_merged: bool | None = None) -> dict:
+    """
+    全資料を再取得し、必要なら結合 PDF を温める。CLI / cron / HTTP 内部 API 用。
+    結果は ``data/last_materials_refresh.json`` にも書き出す。
+    """
+    live = cfg if cfg is not None else load_config()
+    if prebuild_merged is None:
+        prebuild_merged = _merged_pdf_prebuild_enabled(live)
+    ok, err, notes = refetch_all_download_items(live)
+    merged_pages = 0
+    merged_errs: list[str] = []
+    merged_warns: list[str] = []
+    if prebuild_merged:
+        _data, merged_errs, merged_warns, merged_pages = build_merged_pdf_cached(
+            live,
+            force_refresh=True,
+        )
+    ts_jst = datetime.now(JST).strftime("%Y-%m-%d %H:%M JST")
+    ts_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    summary: dict = {
+        "at_jst": ts_jst,
+        "at_utc": ts_utc,
+        "fetch_ok": ok,
+        "fetch_err": err,
+        "merged_pages": merged_pages,
+        "notes": list(notes[:20]),
+        "merged_errs": list(merged_errs[:10]),
+        "merged_warns": list(merged_warns[:10]),
+        "portal_build": PORTAL_BUILD,
+    }
+    try:
+        MATERIALS_REFRESH_STAMP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MATERIALS_REFRESH_STAMP_PATH.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    with _BACKGROUND_STATE_LOCK:
+        _BACKGROUND_STATE["last_refresh_utc"] = ts_utc
+        if prebuild_merged and merged_pages:
+            _BACKGROUND_STATE["last_merged_pdf_utc"] = ts_utc
+    return summary
+
+
+def _cron_refresh_secret(cfg: dict) -> str:
+    raw = _merged_pdf_block(cfg).get("cron_refresh_secret")
+    if raw is None:
+        env = os.environ.get("WX_BRIEFING_CRON_REFRESH_SECRET")
+        return str(env or "").strip()
+    return str(raw).strip()
+
+
+def cron_refresh_authorized(client_host: str, cfg: dict, *, token: str = "", header: str = "") -> bool:
+    """localhost からの cron 用内部更新。secret 設定時は token / ヘッダ必須。"""
+    if client_host not in ("127.0.0.1", "::1"):
+        return False
+    secret = _cron_refresh_secret(cfg)
+    if not secret:
+        return True
+    tok = str(token or "").strip()
+    hdr = str(header or "").strip()
+    if tok and secrets.compare_digest(tok, secret):
+        return True
+    if hdr and secrets.compare_digest(hdr, secret):
+        return True
+    return False
+
+
 def start_wx_briefing_background_scheduler(cfg: dict) -> None:
     """
     ログイン後にバックグラウンドで資料を定期再取得し、結合 PDF を温めておく。
-    ``merged_pdf.background_refresh_minutes``（既定 30、0 で無効＝従来の prefetch のみ）。
+
+    - ``merged_pdf.daily_refresh_jst``（例 ``"08:00"``）… 毎日その JST 時刻に全資料を更新
+    - ``merged_pdf.background_refresh_minutes``（既定 30、0 で間隔更新なし）
+    - 両方未設定（interval=0 かつ daily なし）のときは起動時 prefetch のみ
     """
     global _SCHEDULER_THREAD
     interval_min = _background_refresh_interval_min(cfg)
-    if interval_min <= 0:
+    daily_hm = _parse_daily_refresh_jst(cfg)
+    if interval_min <= 0 and not daily_hm:
         start_wx_briefing_prefetch(cfg)
         return
 
@@ -2642,6 +2778,9 @@ def start_wx_briefing_background_scheduler(cfg: dict) -> None:
         if _SCHEDULER_THREAD is not None and _SCHEDULER_THREAD.is_alive():
             return
         _BACKGROUND_STATE["interval_minutes"] = interval_min
+        _BACKGROUND_STATE["daily_refresh_jst"] = (
+            _daily_refresh_jst_label(*daily_hm) if daily_hm else ""
+        )
         _BACKGROUND_STATE["scheduler_running"] = True
 
     def _loop() -> None:
@@ -2651,7 +2790,14 @@ def start_wx_briefing_background_scheduler(cfg: dict) -> None:
                 _background_materials_refresh_cycle(live)
             except Exception:  # noqa: BLE001
                 pass
-            time.sleep(float(interval_min) * 60.0)
+            try:
+                live = load_config()
+                sleep_sec = _scheduler_sleep_seconds(live)
+                with _BACKGROUND_STATE_LOCK:
+                    _BACKGROUND_STATE["next_refresh_jst"] = _next_refresh_jst_label(live)
+            except Exception:  # noqa: BLE001
+                sleep_sec = 1800.0
+            time.sleep(sleep_sec)
 
     th = threading.Thread(target=_loop, daemon=True, name="wx-briefing-bg-scheduler")
     _SCHEDULER_THREAD = th
@@ -5743,6 +5889,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _do_post(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path == "/internal/refresh-materials":
+            self._handle_internal_refresh_materials()
+            return
         if path != "/metar_taf_pdf":
             self.send_error(404, "Not Found")
             return
@@ -5816,6 +5965,31 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(pdf)
 
+    def _handle_internal_refresh_materials(self) -> None:
+        """cron / launchd から localhost 経由で全資料を再取得（認証は cron secret または localhost のみ）。"""
+        try:
+            cfg = load_config()
+        except Exception as e:  # noqa: BLE001
+            self.send_error(500, f"config error: {e}")
+            return
+        parsed = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(parsed.query)
+        tok = str((q.get("token") or [""])[0]).strip()
+        hdr = str(self.headers.get("X-WX-Briefing-Cron-Token") or "").strip()
+        client = str(self.client_address[0] if self.client_address else "")
+        if not cron_refresh_authorized(client, cfg, token=tok, header=hdr):
+            self.send_error(403, "Forbidden")
+            return
+        summary = run_materials_refresh_job(cfg)
+        body = json.dumps(summary, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-WXBriefing-Build", portal_build_stamp())
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _do_get(self) -> None:
         path = self.path.split("?", 1)[0]
         parsed = urllib.parse.urlparse(self.path)
@@ -5852,6 +6026,9 @@ class Handler(BaseHTTPRequestHandler):
                 "",
                 "この内容が表示されれば、このプロセスがブラウザに応答しています。",
                 "8765 のまま古い画面しか見えない場合は、別プロセスがポートを占有している可能性があります。",
+                "",
+                "cron 更新: POST http://127.0.0.1:<port>/internal/refresh-materials",
+                "（localhost のみ。merged_pdf.cron_refresh_secret 設定時は X-WX-Briefing-Cron-Token ヘッダ）",
             ]
             body = "\n".join(lines).encode("utf-8")
             self.send_response(200)
@@ -6045,6 +6222,16 @@ def main() -> None:
         print("  診断（このサーバーが応答しているか）:", f"http://127.0.0.1:{port}/debug")
     print("  古い画面のとき: Ctrl+F5 またはシークレットウィンドウ")
     print()
+    daily_hm = _parse_daily_refresh_jst(cfg)
+    interval_min = _background_refresh_interval_min(cfg)
+    if daily_hm or interval_min > 0:
+        print("【自動更新】バックグラウンドで全資料を再取得します。")
+        if daily_hm:
+            print(f"  毎日 {_daily_refresh_jst_label(*daily_hm)}（次回: {_next_refresh_jst_label(cfg)}）")
+        if interval_min > 0:
+            print(f"  加えて {interval_min} 分ごと")
+        print("  ※ このプロセスが動いている間のみ有効です。")
+        print()
     print("このウィンドウは閉じないでください。終了は Ctrl+C")
     print("=" * 60)
 
@@ -6060,6 +6247,7 @@ def main() -> None:
         print("数秒後にブラウザを開きます（キャッシュ回避用クエリ付き）。止めたいときは config.json で \"open_browser\": false。")
     else:
         print('ブラウザは自動で開きません（config.json の "open_browser": false）。')
+    start_wx_briefing_background_scheduler(cfg)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

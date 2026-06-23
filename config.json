@@ -12,7 +12,9 @@
   "merged_pdf": {
     "fetch_workers": 12,
     "process_workers": 4,
-    "background_refresh_minutes": 30,
+    "daily_refresh_jst": "08:00",
+    "background_refresh_minutes": 0,
+    "cron_refresh_secret": "",
     "prebuild_merged_pdf": true,
     "merged_pdf_cache_ttl_minutes": 40
   },

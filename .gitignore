@@ -4,3 +4,5 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+data/logs/
+data/last_materials_refresh.json
