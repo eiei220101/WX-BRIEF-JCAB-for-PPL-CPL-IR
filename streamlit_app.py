@@ -198,12 +198,19 @@ def _typhoon_product_lookup(cfg_typhoon: dict) -> dict[str, dict]:
 
 
 def _typhoon_product_fetch_ready(product: dict) -> bool:
-    """page_url / url の有無（app.py 未再起動時も Streamlit 側で判定）。"""
+    """page_url / url / JTWC RSS の有無（app.py 未再起動時も Streamlit 側で判定）。"""
     if not isinstance(product, dict):
         return False
     fn = getattr(wx, "typhoon_product_fetch_ready", None)
     if callable(fn):
         return bool(fn(product))
+    if product.get("jtwc_tc_graphics"):
+        return True
+    norm = getattr(wx, "typhoon_product_id_norm", None)
+    raw_id = str(product.get("id") or "")
+    pid = norm(raw_id) if callable(norm) else raw_id.strip().lower()
+    if pid == "track_usn":
+        return True
     page_url = str(product.get("page_url") or "").strip()
     url = str(product.get("url") or "").strip()
     return page_url.startswith("https://") or url.startswith("https://")

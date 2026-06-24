@@ -48,7 +48,7 @@ from zoneinfo import ZoneInfo
 CONFIG_PATH = Path(__file__).resolve().parent / "config.json"
 USER_AGENT = "WXBriefingPortal/1.0 (+local)"
 # 画面が古いときの切り分け用（更新したら数字を上げる）
-PORTAL_BUILD = "20260618-105-merged-pdf-fresh-items"
+PORTAL_BUILD = "20260624-106-jtwc-tc-warning-graphics"
 
 _PORTAL_APP_PATH = Path(__file__).resolve()
 _PORTAL_GIT_ONCE: str | None = None
@@ -573,8 +573,17 @@ def typhoon_product_lookup(cfg_typhoon: dict) -> dict[str, dict]:
     return out
 
 
+def typhoon_product_uses_jtwc_tc_graphics(product: dict) -> bool:
+    """米海軍 JTWC の TC Warning Graphic（RSS から GIF URL を列挙）を使う product か。"""
+    if product.get("jtwc_tc_graphics"):
+        return True
+    return typhoon_product_id_norm(str(product.get("id") or "")) == "track_usn"
+
+
 def typhoon_product_fetch_ready(product: dict) -> bool:
-    """結合 PDF 取得可能か（直接 url または Playwright 用 page_url）。"""
+    """結合 PDF 取得可能か（直接 url / Playwright page_url / JTWC RSS）。"""
+    if typhoon_product_uses_jtwc_tc_graphics(product):
+        return True
     if str(product.get("page_url") or "").strip().startswith("https://"):
         return True
     if str(product.get("url") or "").strip().startswith("https://"):
@@ -618,6 +627,21 @@ JMA_NUMERICMAP_NWP_BASE = "https://www.jma.go.jp/bosai/numericmap/data/nwpmap/"
 # 航空気象情報「国内悪天予想図（FBJP）」awfo_fbjp.html と同一の表示用 PNG（更新は気象庁側で上書き）
 JMA_AIRINFO_FBJP_PNG = "https://www.data.jma.go.jp/airinfo/data/pict/fbjp/fbjp.png"
 # 下層悪天予想図（awfo_low-level_sigwx.html / conf/functions.js の pict/low-level_sigwx/ 規則）
+JTWC_RSS_URL = "https://www.metoc.navy.mil/jtwc/rss/jtwc.rss"
+JTWC_PAGE_URL = "https://www.metoc.navy.mil/jtwc/jtwc.html"
+JTWC_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+JTWC_TC_GRAPHIC_LINK_RE = re.compile(
+    r"<a[^>]+href=['\"]([^'\"]+)['\"][^>]*>\s*TC Warning Graphic\s*</a>",
+    re.IGNORECASE,
+)
+JTWC_WARNING_HEADING_RE = re.compile(
+    r"<p><b>\s*(?:Typhoon|Tropical (?:Storm|Depression))\s+"
+    r"(\d{2}[A-Z])\s*\(([^)]+)\)\s+Warning\s+#(\d+)\s*</b>",
+    re.IGNORECASE,
+)
 JMA_AIRINFO_LOW_LEVEL_SIGWX_BASE = "https://www.data.jma.go.jp/airinfo/data/pict/low-level_sigwx/"
 JMA_AIRINFO_LOW_LEVEL_SIGWX_AREAS = frozenset(
     {"fbsp", "fbsn", "fbtk", "fbos", "fbkg", "fbok"}
@@ -749,8 +773,89 @@ def load_config() -> dict:
     return json.loads(raw)
 
 
+def fetch_jtwc_rss_text(timeout: int = 60) -> str:
+    """JTWC Tropical Cyclone Information RSS（TC Warning Graphic の URL 列挙用）。"""
+    headers = {
+        "User-Agent": JTWC_BROWSER_USER_AGENT,
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    req = urllib.request.Request(JTWC_RSS_URL, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _parse_jtwc_tc_warning_graphics_from_rss(xml_text: str) -> list[dict]:
+    """
+    JTWC RSS の description から TC Warning Graphic（通常 *.gif）リンクを抽出。
+    複数の現行 Tropical Cyclone Warning があるときはそれぞれ 1 件。
+    """
+    out: list[dict] = []
+    seen_urls: set[str] = set()
+    for desc_m in re.finditer(
+        r"<description><!\[CDATA\[(.*?)\]\]></description>",
+        xml_text,
+        re.DOTALL | re.IGNORECASE,
+    ):
+        html_block = desc_m.group(1)
+        parts = JTWC_WARNING_HEADING_RE.split(html_block)
+        idx = 1
+        while idx + 3 < len(parts):
+            storm_id = parts[idx].strip()
+            storm_name = parts[idx + 1].strip()
+            warn_num = parts[idx + 2].strip()
+            section_html = parts[idx + 3]
+            for g in JTWC_TC_GRAPHIC_LINK_RE.finditer(section_html):
+                url = g.group(1).strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                out.append(
+                    {
+                        "url": url,
+                        "storm_id": storm_id,
+                        "storm_name": storm_name,
+                        "warning_number": warn_num,
+                    }
+                )
+            idx += 4
+    if not out:
+        for g in JTWC_TC_GRAPHIC_LINK_RE.finditer(xml_text):
+            url = g.group(1).strip()
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                out.append(
+                    {
+                        "url": url,
+                        "storm_id": "",
+                        "storm_name": "",
+                        "warning_number": "",
+                    }
+                )
+    return out
+
+
+def jtwc_tc_warning_graphic_filename(base_fn: str, graphic: dict) -> str:
+    """JTWC TC Warning Graphic 用の一意なファイル名（結合 PDF 内の識別用）。"""
+    stem = Path(base_fn).stem if base_fn else "台風予想進路図_米国海軍"
+    ext = Path(str(graphic.get("url") or "")).suffix.lower() or ".gif"
+    if not ext.startswith("."):
+        ext = ".gif"
+    sid = str(graphic.get("storm_id") or "").strip()
+    name = str(graphic.get("storm_name") or "").strip()
+    safe_name = re.sub(r"[^\w\-]+", "_", name).strip("_")
+    if sid and safe_name:
+        suffix = f"_{sid}_{safe_name}"
+    elif sid:
+        suffix = f"_{sid}"
+    else:
+        suffix = f"_{Path(str(graphic.get("url") or "")).stem}"
+    return f"{stem}{suffix}{ext}"
+
+
 def fetch_url(url: str, timeout: int = 60) -> tuple[bytes, str | None]:
     headers = {"User-Agent": USER_AGENT}
+    if "metoc.navy.mil" in url or "metoc.ndbc.noaa.gov" in url:
+        headers["User-Agent"] = JTWC_BROWSER_USER_AGENT
     if "jma.go.jp" in url:
         headers["Cache-Control"] = "max-age=0, no-cache"
         headers["Pragma"] = "no-cache"
@@ -4169,6 +4274,47 @@ def expand_download_items(
                 comment = str(pr.get("comment") or "").strip()
                 page_url = str(pr.get("page_url") or "").strip()
                 url_direct = str(pr.get("url") or "").strip()
+                if typhoon_product_uses_jtwc_tc_graphics(pr):
+                    try:
+                        rss_text = fetch_jtwc_rss_text(timeout=60)
+                        graphics = _parse_jtwc_tc_warning_graphics_from_rss(rss_text)
+                    except Exception as e:  # noqa: BLE001
+                        warnings.append(
+                            f"台風関連「{label}」: JTWC RSS 取得失敗 ({e})"
+                        )
+                        continue
+                    if not graphics:
+                        warnings.append(
+                            f"台風関連「{label}」: 現行の Tropical Cyclone Warning"
+                            "（TC Warning Graphic）がありません"
+                        )
+                        continue
+                    for g in graphics:
+                        gfn = jtwc_tc_warning_graphic_filename(fn, g)
+                        storm_bits: list[str] = []
+                        if g.get("storm_id"):
+                            storm_bits.append(str(g["storm_id"]))
+                        if g.get("storm_name"):
+                            storm_bits.append(str(g["storm_name"]))
+                        if g.get("warning_number"):
+                            storm_bits.append(f"Warning #{g['warning_number']}")
+                        storm_desc = " ".join(storm_bits) if storm_bits else str(g["url"])
+                        gcomment = (
+                            f"台風関連 **{label}** — JTWC TC Warning Graphic（{storm_desc}）。"
+                            f"JTWC RSS（{JTWC_RSS_URL}）から自動取得。"
+                            f"参照: {JTWC_PAGE_URL}"
+                        )
+                        if comment:
+                            gcomment = f"{comment} {gcomment}"
+                        out.append(
+                            {
+                                "filename": gfn,
+                                "url": g["url"],
+                                "typhoon_product_id": pid,
+                                "comment": gcomment,
+                            }
+                        )
+                    continue
                 scr_flag = pr.get("screenshot")
                 use_screenshot = page_url.startswith("https://") and scr_flag is not False
                 if use_screenshot:

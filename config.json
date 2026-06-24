@@ -72,7 +72,9 @@
       {
         "id": "track_usn",
         "label": "台風予想進路図（米国海軍）",
-        "filename": "台風予想進路図_米国海軍.jpg"
+        "filename": "台風予想進路図_米国海軍.gif",
+        "jtwc_tc_graphics": true,
+        "comment": "米海軍 JTWC（Joint Typhoon Warning Center）の TC Warning Graphic。jtwc.rss から現行警報ごとの GIF を取得し結合 PDF に挿入（複数台風時は各1ページ）。"
       },
       {
         "id": "sst_jma",
